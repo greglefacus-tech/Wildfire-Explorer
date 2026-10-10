@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/wildland-fire-game/"
+title = "Wildland Fire Patrol"
+description = "A browser-based first-person 3D wildland forest exploration prototype with procedural grass, bushes, evergreen trees, walking controls, and a wind HUD."
+version = "1.0.0"
+id = "artifacts/wildland-fire-game"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/wildland-fire-game/" ]
+localPort = 23007
+
+[services.development]
+run = "pnpm --filter @workspace/wildland-fire-game run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/wildland-fire-game", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/wildland-fire-game/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23007"
+BASE_PATH = "/wildland-fire-game/"
