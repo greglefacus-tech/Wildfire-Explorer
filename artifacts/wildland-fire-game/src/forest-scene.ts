@@ -1,16 +1,16 @@
-type SceneHandle = {
-  lock: () => void;
-  dispose: () => void;
-  onLockChange: (callback: (locked: boolean) => void) => void;
-};
+import { createFireSimulation, getFireGridCellIndex, type FireSimulation } from './fire-simulation';
+import type { ForestSceneCallbacks, ForestSceneHandle } from './game-types';
 
-type Collider = { x: number; z: number; radius: number };
+type Collider = { x: number; z: number; radius: number; mesh?: any };
 
 /**
  * All Three.js code is intentionally loaded in the browser from the import map.
  * This keeps the prototype client-only and avoids bundling a second Three build.
  */
-export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandle> {
+export async function mountForest(
+  canvas: HTMLCanvasElement,
+  callbacks: ForestSceneCallbacks = {},
+): Promise<ForestSceneHandle> {
   // Import by URL so Vite leaves Three.js on the CDN rather than trying to bundle it.
   const threeModuleUrl = 'https://unpkg.com/three@0.170.0/build/three.module.js';
   const controlsModuleUrl = 'https://unpkg.com/three@0.170.0/examples/jsm/controls/PointerLockControls.js';
@@ -78,6 +78,7 @@ export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandl
     return seed / 4294967296;
   };
   const colliders: Collider[] = [];
+  const treeFuelPoints: { x: number; z: number; height: number }[] = [];
   const trunkGeometry = new THREE.CylinderGeometry(0.16, 0.26, 1, 7);
   const trunkMaterial = new THREE.MeshStandardMaterial({ color: '#4d4332', roughness: 1 });
   const canopyGeometry = [
@@ -100,6 +101,7 @@ export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandl
     const scale = 0.78 + random() * 0.62;
     const y = terrainHeight(x, z);
     const trunkHeight = 3.5 * scale;
+    treeFuelPoints.push({ x, z, height: 7.05 * scale });
     const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
     trunk.position.set(x, y + trunkHeight / 2, z);
     trunk.scale.set(scale, trunkHeight, scale);
@@ -120,6 +122,8 @@ export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandl
   const bushMaterials = ['#506e43', '#597647', '#647e4d', '#4b6742'].map((color) =>
     new THREE.MeshStandardMaterial({ color, roughness: 1, flatShading: true }),
   );
+  const bushFuelPoints: { x: number; z: number }[] = [];
+  const bushesByCell = new Map<number, any[]>();
   for (let i = 0; i < 148; i++) {
     const x = (random() - 0.5) * 126;
     const z = (random() - 0.5) * 126;
@@ -131,16 +135,36 @@ export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandl
     bush.scale.set(scale * 1.25, scale * 0.72, scale);
     bush.rotation.y = random() * 5;
     scene.add(bush);
-    colliders.push({ x, z, radius: 0.55 * scale });
+    bushFuelPoints.push({ x, z });
+    colliders.push({ x, z, radius: 0.55 * scale, mesh: bush });
+    const centerCell = getFireGridCellIndex(x, z);
+    if (centerCell >= 0) {
+      const centerColumn = centerCell % 64;
+      const centerRow = Math.floor(centerCell / 64);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const column = centerColumn + dx;
+          const row = centerRow + dz;
+          if (column < 0 || column >= 64 || row < 0 || row >= 64) continue;
+          const nearbyCell = row * 64 + column;
+          const bucket = bushesByCell.get(nearbyCell) ?? [];
+          bucket.push(bush);
+          bushesByCell.set(nearbyCell, bucket);
+        }
+      }
+    }
   }
 
   // Blade triangles are assembled into one mesh for a light, patchy understory.
   const grassVertices: number[] = [];
   const grassColors: number[] = [];
+  const grassBladesByCell = new Map<number, number[]>();
+  const grassFuelPoints: { x: number; z: number }[] = [];
   const grassPalette = [new THREE.Color('#91a760'), new THREE.Color('#a2b56c'), new THREE.Color('#809b56')];
   for (let patch = 0; patch < 190; patch++) {
     const cx = (random() - 0.5) * 145;
     const cz = (random() - 0.5) * 145;
+    grassFuelPoints.push({ x: cx, z: cz });
     const count = 8 + Math.floor(random() * 11);
     for (let blade = 0; blade < count; blade++) {
       const x = cx + (random() - 0.5) * 2.4;
@@ -152,22 +176,80 @@ export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandl
       const a = random() * Math.PI * 2;
       const dx = Math.cos(a) * width, dz = Math.sin(a) * width;
       const color = grassPalette[Math.floor(random() * grassPalette.length)];
+      const firstVertex = grassVertices.length / 3;
       grassVertices.push(x - dx, y, z - dz, x + dx, y, z + dz, x + lean, y + height, z + lean);
       for (let k = 0; k < 3; k++) grassColors.push(color.r, color.g, color.b);
+      const cell = getFireGridCellIndex(x, z);
+      if (cell >= 0) {
+        const blades = grassBladesByCell.get(cell) ?? [];
+        blades.push(firstVertex);
+        grassBladesByCell.set(cell, blades);
+      }
     }
   }
   const grassGeometry = new THREE.BufferGeometry();
   grassGeometry.setAttribute('position', new THREE.Float32BufferAttribute(grassVertices, 3));
   grassGeometry.setAttribute('color', new THREE.Float32BufferAttribute(grassColors, 3));
   grassGeometry.computeVertexNormals();
-  scene.add(new THREE.Mesh(grassGeometry, new THREE.MeshStandardMaterial({
+  const grassMesh = new THREE.Mesh(grassGeometry, new THREE.MeshStandardMaterial({
     vertexColors: true, side: THREE.DoubleSide, roughness: 1,
-  })));
+  }));
+  grassMesh.frustumCulled = false;
+  scene.add(grassMesh);
+
+  const grassPosition = grassGeometry.attributes.position;
+  const fireSystem: FireSimulation = createFireSimulation({
+    THREE,
+    scene,
+    terrainHeight,
+    random,
+    trees: treeFuelPoints,
+    bushes: bushFuelPoints,
+    grassPatches: grassFuelPoints,
+    onStats: callbacks.onFireStats,
+    onDigCell: (cell) => {
+      const blades = grassBladesByCell.get(cell);
+      if (blades) {
+        for (const firstVertex of blades) {
+          for (let vertex = 0; vertex < 3; vertex++) grassPosition.setY(firstVertex + vertex, -5);
+        }
+        grassPosition.needsUpdate = true;
+      }
+      for (const bush of bushesByCell.get(cell) ?? []) bush.visible = false;
+    },
+  });
 
   controls.object.position.set(0, terrainHeight(0, 0) + 1.68, 0);
   const keys = new Set<string>();
+  let menuOpen = false;
+  let trenching = false;
+  let lockedCallback = (_locked: boolean) => {};
+
+  const setMenuState = (open: boolean) => {
+    menuOpen = open;
+    if (open) {
+      keys.clear();
+      controls.unlock();
+    }
+    callbacks.onMenuChange?.(open);
+  };
+
   const onKeyDown = (event: KeyboardEvent) => {
     const key = event.key.toLowerCase();
+    if (key === 'escape' || key === 'tab') {
+      event.preventDefault();
+      if (!event.repeat) setMenuState(!menuOpen);
+      return;
+    }
+    if (key === 'p') {
+      event.preventDefault();
+      if (!event.repeat && !menuOpen) {
+        if (controls.isLocked) controls.unlock();
+        else controls.lock();
+      }
+      return;
+    }
+    if (menuOpen) return;
     if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
       keys.add(key);
       if (key.startsWith('arrow')) event.preventDefault();
@@ -176,11 +258,57 @@ export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandl
   const onKeyUp = (event: KeyboardEvent) => keys.delete(event.key.toLowerCase());
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
-  let lockedCallback = (_locked: boolean) => {};
-  const onLock = () => lockedCallback(true);
-  const onUnlock = () => lockedCallback(false);
+  const onLock = () => {
+    lockedCallback(true);
+    callbacks.onLockChange?.(true);
+  };
+  const onUnlock = () => {
+    keys.clear();
+    lockedCallback(false);
+    callbacks.onLockChange?.(false);
+  };
   controls.addEventListener('lock', onLock);
   controls.addEventListener('unlock', onUnlock);
+
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  const groundPointFromEvent = (event: PointerEvent) => {
+    if (controls.isLocked) {
+      pointer.set(0, 0);
+    } else {
+      const bounds = canvas.getBoundingClientRect();
+      pointer.set(
+        ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
+        -((event.clientY - bounds.top) / bounds.height) * 2 + 1,
+      );
+    }
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObject(terrain, false);
+    return hits.length ? hits[0].point : null;
+  };
+  const digFromEvent = (event: PointerEvent) => {
+    const point = groundPointFromEvent(event);
+    if (point) fireSystem.digAt(point.x, point.z);
+  };
+  const onPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0 || menuOpen) return;
+    trenching = true;
+    canvas.classList.add('is-trenching');
+    digFromEvent(event);
+  };
+  const onPointerMove = (event: PointerEvent) => {
+    if (trenching) digFromEvent(event);
+  };
+  const onPointerEnd = (event: PointerEvent) => {
+    if (event.button !== 0 || !trenching) return;
+    trenching = false;
+    canvas.classList.remove('is-trenching');
+    fireSystem.endTrench();
+  };
+  canvas.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerEnd);
+  window.addEventListener('pointercancel', onPointerEnd);
 
   const resize = () => {
     const width = Math.max(1, canvas.clientWidth);
@@ -212,27 +340,39 @@ export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandl
         controls.moveRight(side * distance);
         const pos = controls.object.position;
         const outside = Math.abs(pos.x) > 83 || Math.abs(pos.z) > 83;
-        const blocked = colliders.some((item) => Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48);
+        const blocked = colliders.some((item) =>
+          (!item.mesh || item.mesh.visible) && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
+        );
         if (outside || blocked) {
           // Slide along obstacles and keep the patrol inside the clearing.
           const tryX = pos.x;
           const tryZ = pos.z;
           pos.copy(before);
           pos.x = tryX;
-          if (colliders.some((item) => Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48) || Math.abs(pos.x) > 83) pos.x = before.x;
+          if (colliders.some((item) =>
+            (!item.mesh || item.mesh.visible) && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
+          ) || Math.abs(pos.x) > 83) pos.x = before.x;
           pos.z = tryZ;
-          if (colliders.some((item) => Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48) || Math.abs(pos.z) > 83) pos.z = before.z;
+          if (colliders.some((item) =>
+            (!item.mesh || item.mesh.visible) && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
+          ) || Math.abs(pos.z) > 83) pos.z = before.z;
         }
         pos.y = terrainHeight(pos.x, pos.z) + 1.68;
       }
     }
+    fireSystem.update(dt, now / 1000, camera);
     renderer.render(scene, camera);
   };
   frame = requestAnimationFrame(animate);
 
   return {
-    lock: () => controls.lock(),
-    onLockChange: (callback) => { lockedCallback = callback; },
+    lock: () => {
+      if (menuOpen) setMenuState(false);
+      controls.lock();
+    },
+    unlock: () => controls.unlock(),
+    setWind: (directionDegrees, speedMph) => fireSystem.setWind(directionDegrees, speedMph),
+    setMenuOpen: (open) => setMenuState(open),
     dispose: () => {
       disposed = true;
       cancelAnimationFrame(frame);
@@ -240,8 +380,13 @@ export async function mountForest(canvas: HTMLCanvasElement): Promise<SceneHandl
       window.removeEventListener('resize', resize);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      canvas.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerEnd);
+      window.removeEventListener('pointercancel', onPointerEnd);
       controls.removeEventListener('lock', onLock);
       controls.removeEventListener('unlock', onUnlock);
+      fireSystem.dispose();
       controls.dispose();
       scene.traverse((object: any) => {
         object.geometry?.dispose?.();

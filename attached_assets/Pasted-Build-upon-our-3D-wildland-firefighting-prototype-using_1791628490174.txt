@@ -1,0 +1,34 @@
+Build upon our 3D wildland firefighting prototype using Three.js. We want to add realistic fire behavior, real-life fuel dynamics, wind controls, and a firefighter trenching tool.
+
+Please implement the following features:
+
+1. Dynamic Fire System (Cellular Automata Engine):
+   - Grid-Based Spread: Overlay a logical fuel grid on top of the terrain map.
+   - Fire Scale & Intensity: 
+     * Small, slow-moving ground fires in light grass that are easy to contain.
+     * Massive, intense crown fires taller than trees when igniting dense trees/bushes under high wind.
+   - Realistic Fuel Dynamics:
+     * Grass: Burns quickly with low flame height, acts as fast-moving surface fuel.
+     * Trees & Bushes: Take longer to ignite, but burn hotter and longer with huge flames and dark smoke.
+     * Dirt / Firebreaks: Have 0 fuel and permanently block fire propagation.
+
+2. Map Border Firefront & Ignition:
+   - Turn the outer edge/border of the map into the main advancing firefront.
+   - The fire line along the edge slowly creeps inward into the forest, with its speed and direction heavily driven by wind.
+
+3. Wind Variables & Real-Time HUD Controls:
+   - Expose real-time UI controls (sliders) for:
+     * Wind Direction (0° to 360°)
+     * Wind Speed (Light Breeze to High Winds)
+   - Fire spread probability and flame particle direction must dynamically tilt and push downwind according to these sliders.
+
+4. Firefighter Digging Tool (Pulaski / Trench Line):
+   - When the firefighter holds Left Click on the ground, scrape away grass and vegetation to create a dirt firebreak trench.
+   - Visual Feedback: Change the terrain surface color to bare dirt brown where scraped, and immediately clear the fuel value of those cells to stop advancing flames.
+
+5. Controls & Cursor Unlock:
+   - WASD to walk, Mouse to look around.
+   - Pressing the 'P' key cleanly toggles the mouse pointer lock on and off (unlocking the cursor lets the user click UI buttons and adjust sliders without opening the pause menu).
+   - Pressing 'Esc' or 'Tab' opens the main options menu.
+
+Make the visual fire particle effects (sparks, rising smoke, glowing embers) look vibrant and high-contrast, keeping the code clean, performant, and self-contained in index.html.

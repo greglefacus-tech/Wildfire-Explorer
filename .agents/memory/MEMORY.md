@@ -1,0 +1,1 @@
+- [WebGL preview limitation](webgl-preview-limitation.md) — the screenshot browser repeatedly could not create a WebGL context for this Three.js game.
