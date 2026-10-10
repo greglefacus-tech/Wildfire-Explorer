@@ -87,19 +87,14 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   let statsClock = 0;
   let statsDirty = true;
 
-  const cellIndex = (x: number, z: number) => {
-    const column = Math.floor((x - GRID_ORIGIN) / CELL_SIZE);
-    const row = Math.floor((z - GRID_ORIGIN) / CELL_SIZE);
-    if (column < 0 || column >= GRID_SIZE || row < 0 || row >= GRID_SIZE) return -1;
-    return row * GRID_SIZE + column;
-  };
   const cellX = (index: number) => GRID_ORIGIN + (index % GRID_SIZE + 0.5) * CELL_SIZE;
   const cellZ = (index: number) => GRID_ORIGIN + (Math.floor(index / GRID_SIZE) + 0.5) * CELL_SIZE;
   const columnOf = (index: number) => index % GRID_SIZE;
   const rowOf = (index: number) => Math.floor(index / GRID_SIZE);
 
-  // Most open ground has patchy grass; real tree and brush locations override it.
-  for (let i = 0; i < CELL_COUNT; i++) fuels[i] = random() < 0.61 ? GRASS : NO_FUEL;
+  // Continuous grass fuel lets the initial edge fire read as a connected front.
+  // Real tree and brush locations override grass with their heavier fuel types.
+  fuels.fill(GRASS);
 
   const paintFuel = (point: FuelPoint, fuel: number, radius: number) => {
     const minX = Math.max(0, Math.floor((point.x - radius - GRID_ORIGIN) / CELL_SIZE));
@@ -286,8 +281,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const ground = terrainHeight(x, z);
     const wind = windVector();
     const strength = windSpeed / 35;
-    const smokeCount = initial ? (type === GRASS ? 2 : 4) : (type === GRASS ? 1 : 2);
-    const emberCount = initial ? (type === TREE ? 7 : 4) : (type === TREE ? 3 : 2);
+    const smokeCount = initial ? (type === GRASS ? 1 : 3) : 1;
+    const emberCount = type === GRASS ? 0 : initial ? (type === TREE ? 3 : 2) : crownMask[index] ? 2 : 1;
     for (let i = 0; i < smokeCount; i++) {
       const p: Particle = {
         x: x + (random() - 0.5) * CELL_SIZE * 0.55,
@@ -343,20 +338,20 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     states[index] = BURNING;
     crownMask[index] = crown ? 1 : 0;
     age[index] = 0;
-    spreadClock[index] = 0.28 + random() * 0.38;
+    spreadClock[index] = 1.8 + random() * 1.2;
     emissionClock[index] = 0;
-    let duration = type === GRASS ? 2.2 + random() * 1.8
-      : type === BRUSH ? 6 + random() * 4.5
-      : 10 + random() * 7;
+    let duration = type === GRASS ? 14 + random() * 7
+      : type === BRUSH ? 20 + random() * 10
+      : 30 + random() * 16;
     if (crown) duration *= 1.28;
     burnDuration[index] = duration;
     flameHeight[index] = type === GRASS
-      ? 0.48 + windSpeed / 35 * 0.72
+      ? 1.45 + windSpeed / 35 * 0.65
       : crown
-        ? Math.max(10.2, nearbyTreeHeight * 1.3) + random() * 1.8
+        ? Math.max(12.5, nearbyTreeHeight * 1.5) + random() * 2.4
         : type === BRUSH
-          ? 1.9 + windSpeed / 35 * 1.35
-          : nearbyTreeHeight + windSpeed / 35 * 1.25;
+          ? 3.8 + windSpeed / 35 * 1.2
+          : nearbyTreeHeight * 1.28 + windSpeed / 35 * 0.8;
     const slot = activeCells.length;
     activeCells.push(index);
     burnSlot[index] = slot;
@@ -367,8 +362,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     innerFlames.setColorAt(index, new THREE.Color(crown ? '#fff0a0' : '#ffd76b'));
     const x = cellX(index);
     const z = cellZ(index);
-    setFlameMatrix(outerFlames, index, x, z, terrainHeight(x, z), flameHeight[index] * 0.58, flameHeight[index], 0);
-    setFlameMatrix(innerFlames, index, x, z, terrainHeight(x, z), flameHeight[index] * 0.27, flameHeight[index] * 0.58, 0.02);
+    setFlameMatrix(outerFlames, index, x, z, terrainHeight(x, z), CELL_SIZE * 1.22, flameHeight[index], 0);
+    setFlameMatrix(innerFlames, index, x, z, terrainHeight(x, z), CELL_SIZE * 0.68, flameHeight[index] * 0.58, 0.02);
     emitForCell(index, true);
     statsDirty = true;
     return true;
@@ -494,14 +489,11 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const attemptSpread = (sourceIndex: number) => {
     const column = columnOf(sourceIndex);
     const row = rowOf(sourceIndex);
-    const sourceFuel = fuels[sourceIndex];
     const wind = windVector();
     const windStrength = windSpeed / 35;
-    const directions = [
-      [-1, -1], [0, -1], [1, -1],
-      [-1, 0],             [1, 0],
-      [-1, 1],  [0, 1],   [1, 1],
-    ];
+    // The west-edge line advances east. Adjacent diagonals overlap the cells
+    // along the front, while reverse spread and isolated spot fires are disabled.
+    const directions = [[1, -1], [1, 0], [1, 1]];
     const sourceHeight = terrainHeight(cellX(sourceIndex), cellZ(sourceIndex));
     for (const [dx, dz] of directions) {
       const nextColumn = column + dx;
@@ -515,7 +507,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       const directional = alignment >= 0
         ? 1 + alignment * windStrength * 2.75
         : Math.max(0.08, 1 + alignment * windStrength * 0.9);
-      const baseProbability = targetFuel === GRASS ? 0.15 : targetFuel === BRUSH ? 0.082 : 0.054;
+      const baseProbability = targetFuel === GRASS ? 0.04 : targetFuel === BRUSH ? 0.48 : 0.72;
       const slope = (terrainHeight(cellX(next), cellZ(next)) - sourceHeight) / CELL_SIZE;
       const slopeFactor = Math.max(0.65, Math.min(1.48, 1 + slope * 0.5));
       const crownFactor = crownMask[sourceIndex] ? 1.65 : 1;
@@ -528,20 +520,6 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       if (random() < probability) ignite(next);
     }
 
-    // Strong winds can carry embers past one neighboring fuel cell.
-    if (windSpeed >= 24 && random() < windStrength * 0.22) {
-      const jump = 2 + (windSpeed >= 31 ? 1 : 0);
-      const columnStep = Math.round(wind.x * jump);
-      const rowStep = Math.round(wind.z * jump);
-      if (columnStep || rowStep) {
-        const targetColumn = column + columnStep;
-        const targetRow = row + rowStep;
-        if (targetColumn >= 0 && targetColumn < GRID_SIZE && targetRow >= 0 && targetRow < GRID_SIZE) {
-          const target = targetRow * GRID_SIZE + targetColumn;
-          if (fuels[target] !== NO_FUEL && states[target] === UNBURNED) ignite(target);
-        }
-      }
-    }
   };
 
   const update = (dt: number, elapsed: number, camera: any) => {
@@ -551,12 +529,13 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       age[index] += dt;
       spreadClock[index] -= dt;
       emissionClock[index] += dt;
-      if (emissionClock[index] > (crownMask[index] ? 0.16 : 0.29)) {
+      const emissionInterval = crownMask[index] ? 0.22 : fuels[index] === TREE ? 0.45 : fuels[index] === BRUSH ? 0.65 : 1.15;
+      if (emissionClock[index] > emissionInterval) {
         emissionClock[index] = 0;
         emitForCell(index);
       }
       if (spreadClock[index] <= 0) {
-        spreadClock[index] = 0.42 + random() * 0.34;
+        spreadClock[index] = 2.1 + random() * 1.2;
         attemptSpread(index);
       }
       if (age[index] >= burnDuration[index]) finishBurn(index);
@@ -570,8 +549,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       const phase = elapsed * (crownMask[index] ? 9.5 : 7.1) + index * 0.73;
       const flicker = 0.88 + Math.sin(phase) * 0.075 + Math.sin(phase * 2.31) * 0.035;
       const height = flameHeight[index] * flicker;
-      setFlameMatrix(outerFlames, index, x, z, ground, height * 0.56, height, Math.sin(phase * 0.6) * 0.1, camera);
-      setFlameMatrix(innerFlames, index, x, z, ground + height * 0.015, height * 0.25, height * 0.57, -Math.sin(phase) * 0.14, camera);
+      setFlameMatrix(outerFlames, index, x, z, ground, CELL_SIZE * 1.22, height, Math.sin(phase * 0.6) * 0.1, camera);
+      setFlameMatrix(innerFlames, index, x, z, ground + height * 0.015, CELL_SIZE * 0.68, height * 0.57, -Math.sin(phase) * 0.14, camera);
     }
     outerFlames.instanceMatrix.needsUpdate = true;
     innerFlames.instanceMatrix.needsUpdate = true;
@@ -586,20 +565,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     }
   };
 
-  // The map edge is the first fireline; subsequent generations advance inward.
-  for (let column = 0; column < GRID_SIZE; column++) {
-    for (const row of [0, GRID_SIZE - 1]) {
-      const index = row * GRID_SIZE + column;
-      if (fuels[index] === NO_FUEL) fuels[index] = GRASS;
-      ignite(index);
-    }
-  }
-  for (let row = 1; row < GRID_SIZE - 1; row++) {
-    for (const column of [0, GRID_SIZE - 1]) {
-      const index = row * GRID_SIZE + column;
-      if (fuels[index] === NO_FUEL) fuels[index] = GRASS;
-      ignite(index);
-    }
+  // Begin as one continuous west-edge fireline, then slowly advance east.
+  for (let row = 0; row < GRID_SIZE; row++) {
+    ignite(row * GRID_SIZE);
   }
   options.onStats?.(getStats());
 

@@ -192,7 +192,7 @@ export default function App() {
         <div className="lower-left">
           <section className="controls-card" aria-label="Field controls" data-testid="panel-controls">
             <div className="controls-title">
-              <span><i className="live-dot" />On foot</span>
+              <span><i className="live-dot" />McLeod equipped</span>
               <span>Patrol controls</span>
             </div>
             <div className="key-layout" aria-label="Use W A S D to move and mouse to look">
@@ -203,11 +203,11 @@ export default function App() {
               <div className="mouse-hint"><strong>Mouse</strong>Look around</div>
             </div>
             <div className="controls-instruction">
-              <span><strong>WASD</strong> move · <strong>Mouse</strong> look · hold <strong>Left mouse</strong> on ground to trench</span>
+              <span><strong>WASD</strong> move · <strong>Mouse</strong> look · hold <strong>Left mouse</strong> to rake beneath your boots</span>
               <span><strong>P</strong> toggle pointer lock · <strong>Esc / Tab</strong> options menu</span>
             </div>
           </section>
-          <div className="footer-note" data-testid="text-terrain-note">Terrain · mixed conifer forest</div>
+          <div className="footer-note" data-testid="text-terrain-note">Fireline · west edge advancing east</div>
         </div>
       </section>
 
@@ -234,14 +234,14 @@ export default function App() {
             {error
               ? 'The scene could not be started. Refresh the page to try again.'
               : ready
-                ? 'Move through the trees, read the wind, and cut a line before the fire reaches you.'
+                ? 'A slow wall of fire is advancing from the west. Move through the trees and rake a firebreak beneath your boots.'
                 : 'Building the canopy, brush and trail around you.'}
           </span>
           {!error && ready && (
             <span className="enter-button"><span className="enter-icon" aria-hidden="true">↗</span>Click to enter</span>
           )}
           {!ready && !error && <span className="lock-foot">Loading the landscape</span>}
-          {ready && !error && <span className="lock-foot">WASD to walk · mouse to look · hold left mouse to trench</span>}
+          {ready && !error && <span className="lock-foot">WASD to walk · mouse to look · hold left mouse to rake beneath you</span>}
         </span>
       </button>
 
@@ -268,7 +268,7 @@ export default function App() {
               </div>
             </div>
             <div className="menu-controls" data-testid="text-options-controls">
-              <strong>WASD</strong> move · <strong>Mouse</strong> look · hold <strong>left mouse</strong> on ground to trench.
+              <strong>WASD</strong> move · <strong>Mouse</strong> look · hold <strong>left mouse</strong> to rake beneath your boots with the McLeod.
               <br />
               Press <strong>P</strong> to toggle pointer lock. Press <strong>Esc</strong> or <strong>Tab</strong> for this menu.
             </div>

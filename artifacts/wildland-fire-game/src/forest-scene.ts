@@ -32,6 +32,27 @@ export async function mountForest(
   controls.pointerSpeed = 0.72;
   scene.add(controls.object);
 
+  // Simple camera-attached McLeod view model: timber handle, rake head and teeth.
+  const mcleod = new THREE.Group();
+  mcleod.position.set(0.43, -0.39, -0.88);
+  mcleod.rotation.set(0.02, 0.08, -0.48);
+  camera.add(mcleod);
+  const handleMaterial = new THREE.MeshStandardMaterial({ color: '#795632', roughness: 0.88 });
+  const steelMaterial = new THREE.MeshStandardMaterial({ color: '#aeb9b5', metalness: 0.86, roughness: 0.38 });
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.027, 0.9, 8), handleMaterial);
+  handle.position.set(0, 0.28, 0);
+  handle.rotation.z = -0.08;
+  mcleod.add(handle);
+  const rakeHead = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.04, 0.065), steelMaterial);
+  rakeHead.position.set(-0.04, 0.71, 0);
+  mcleod.add(rakeHead);
+  const toothGeometry = new THREE.BoxGeometry(0.018, 0.11, 0.032);
+  for (let tooth = 0; tooth < 7; tooth++) {
+    const tine = new THREE.Mesh(toothGeometry, steelMaterial);
+    tine.position.set(-0.19 + tooth * 0.05, 0.635, 0);
+    mcleod.add(tine);
+  }
+
   const hemi = new THREE.HemisphereLight('#e1e5c8', '#485b43', 2.05);
   scene.add(hemi);
   const sun = new THREE.DirectionalLight('#fff1cb', 2.4);
@@ -220,6 +241,7 @@ export async function mountForest(
   });
 
   controls.object.position.set(0, terrainHeight(0, 0) + 1.68, 0);
+  controls.object.rotation.y = Math.PI / 2;
   const keys = new Set<string>();
   let menuOpen = false;
   let trenching = false;
@@ -229,6 +251,9 @@ export async function mountForest(
     menuOpen = open;
     if (open) {
       keys.clear();
+      trenching = false;
+      canvas.classList.remove('is-trenching');
+      fireSystem.endTrench();
       controls.unlock();
     }
     callbacks.onMenuChange?.(open);
@@ -270,45 +295,35 @@ export async function mountForest(
   controls.addEventListener('lock', onLock);
   controls.addEventListener('unlock', onUnlock);
 
-  const raycaster = new THREE.Raycaster();
-  const pointer = new THREE.Vector2();
-  const groundPointFromEvent = (event: PointerEvent) => {
-    if (controls.isLocked) {
-      pointer.set(0, 0);
-    } else {
-      const bounds = canvas.getBoundingClientRect();
-      pointer.set(
-        ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
-        -((event.clientY - bounds.top) / bounds.height) * 2 + 1,
-      );
-    }
-    raycaster.setFromCamera(pointer, camera);
-    const hits = raycaster.intersectObject(terrain, false);
-    return hits.length ? hits[0].point : null;
-  };
-  const digFromEvent = (event: PointerEvent) => {
-    const point = groundPointFromEvent(event);
-    if (point) fireSystem.digAt(point.x, point.z);
+  const digAtPlayer = () => {
+    const position = controls.object.position;
+    fireSystem.digAt(position.x, position.z);
   };
   const onPointerDown = (event: PointerEvent) => {
     if (event.button !== 0 || menuOpen) return;
+    const target = event.target as Element | null;
+    if (target?.closest?.('.hud, .menu-backdrop, .lock-screen')) return;
+    if (!controls.isLocked && target !== canvas) return;
     trenching = true;
     canvas.classList.add('is-trenching');
-    digFromEvent(event);
-  };
-  const onPointerMove = (event: PointerEvent) => {
-    if (trenching) digFromEvent(event);
+    digAtPlayer();
   };
   const onPointerEnd = (event: PointerEvent) => {
-    if (event.button !== 0 || !trenching) return;
+    if ((event.type !== 'pointercancel' && event.button !== 0) || !trenching) return;
     trenching = false;
     canvas.classList.remove('is-trenching');
     fireSystem.endTrench();
   };
-  canvas.addEventListener('pointerdown', onPointerDown);
-  window.addEventListener('pointermove', onPointerMove);
+  const onWindowBlur = () => {
+    if (!trenching) return;
+    trenching = false;
+    canvas.classList.remove('is-trenching');
+    fireSystem.endTrench();
+  };
+  window.addEventListener('pointerdown', onPointerDown);
   window.addEventListener('pointerup', onPointerEnd);
   window.addEventListener('pointercancel', onPointerEnd);
+  window.addEventListener('blur', onWindowBlur);
 
   const resize = () => {
     const width = Math.max(1, canvas.clientWidth);
@@ -360,6 +375,15 @@ export async function mountForest(
         pos.y = terrainHeight(pos.x, pos.z) + 1.68;
       }
     }
+    if (trenching) digAtPlayer();
+    if (trenching) {
+      const stroke = Math.sin(now * 0.018);
+      mcleod.rotation.x = 0.02 + stroke * 0.14;
+      mcleod.rotation.z = -0.48 + Math.abs(stroke) * 0.12;
+    } else {
+      mcleod.rotation.x = 0.02;
+      mcleod.rotation.z = -0.48;
+    }
     fireSystem.update(dt, now / 1000, camera);
     renderer.render(scene, camera);
   };
@@ -380,10 +404,10 @@ export async function mountForest(
       window.removeEventListener('resize', resize);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
-      canvas.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointerup', onPointerEnd);
       window.removeEventListener('pointercancel', onPointerEnd);
+      window.removeEventListener('blur', onWindowBlur);
       controls.removeEventListener('lock', onLock);
       controls.removeEventListener('unlock', onUnlock);
       fireSystem.dispose();

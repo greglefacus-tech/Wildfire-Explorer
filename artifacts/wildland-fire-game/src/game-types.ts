@@ -1,4 +1,4 @@
-export const INITIAL_WIND_DIRECTION = 45;
+export const INITIAL_WIND_DIRECTION = 90;
 export const INITIAL_WIND_SPEED = 15;
 export const MAX_WIND_SPEED = 35;
 
