@@ -27,6 +27,7 @@ type FireSystemOptions = {
   grassPatches: FuelPoint[];
   onStats?: (stats: FireStats) => void;
   onDigCell?: (cellIndex: number) => void;
+  onCellBurned?: (cellIndex: number) => void;
 };
 
 export type FireSimulation = {
@@ -38,9 +39,12 @@ export type FireSimulation = {
   dispose: () => void;
 };
 
-const GRID_SIZE = 64;
-const CELL_SIZE = 2.5;
-const GRID_ORIGIN = -80;
+export const FIRE_GRID_SIZE = 112;
+export const FIRE_GRID_CELL_SIZE = 2.5;
+export const FIRE_GRID_ORIGIN = -140;
+const GRID_SIZE = FIRE_GRID_SIZE;
+const CELL_SIZE = FIRE_GRID_CELL_SIZE;
+const GRID_ORIGIN = FIRE_GRID_ORIGIN;
 const CELL_COUNT = GRID_SIZE * GRID_SIZE;
 
 export function getFireGridCellIndex(x: number, z: number) {
@@ -78,7 +82,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const activeCells: number[] = [];
   let lastDig: { x: number; z: number } | null = null;
 
-  let windDirection = 45;
+  let windDirection = 90;
   let windSpeed = 15;
   let burningCount = 0;
   let burnedCount = 0;
@@ -146,6 +150,48 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     innerFlames.setMatrixAt(i, dummy.matrix);
   }
   scene.add(outerFlames, innerFlames);
+  const createWallLayer = (palette: string[], opacity: number) => {
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(GRID_SIZE * 4 * 3);
+    const colors = new Float32Array(GRID_SIZE * 4 * 3);
+    const indices = new Uint16Array(GRID_SIZE * 6);
+    const colorObjects = palette.map((color) => new THREE.Color(color));
+    for (let row = 0; row < GRID_SIZE; row++) {
+      const vertex = row * 4;
+      const paletteOrder = [0, 0, 1, 2];
+      for (let corner = 0; corner < 4; corner++) {
+        const color = colorObjects[paletteOrder[corner]];
+        const offset = (vertex + corner) * 3;
+        colors[offset] = color.r;
+        colors[offset + 1] = color.g;
+        colors[offset + 2] = color.b;
+      }
+      const indexOffset = row * 6;
+      indices.set([vertex, vertex + 1, vertex + 2, vertex, vertex + 2, vertex + 3], indexOffset);
+    }
+    const positionAttribute = new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute('position', positionAttribute);
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.setDrawRange(0, GRID_SIZE * 6);
+    const material = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    return { mesh, geometry, material, positions, positionAttribute };
+  };
+  const outerWall = createWallLayer(['#ffb23d', '#ff5113', '#c8210a'], 0.92);
+  const innerWall = createWallLayer(['#fff0a0', '#ffb233', '#f0440b'], 0.88);
+  const frontByRow = new Int32Array(GRID_SIZE);
+  const wallXByRow = new Float32Array(GRID_SIZE);
+  for (let row = 0; row < GRID_SIZE; row++) wallXByRow[row] = cellX(row * GRID_SIZE);
   const setFlameMatrix = (
     mesh: any,
     index: number,
@@ -167,6 +213,11 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     }
     dummy.updateMatrix();
     mesh.setMatrixAt(index, dummy.matrix);
+  };
+
+  const burnLifeFactor = (index: number) => {
+    const progress = age[index] / Math.max(1, burnDuration[index]);
+    return progress <= 0.68 ? 1 : Math.max(0.24, 1 - ((progress - 0.68) / 0.32) * 0.76);
   };
 
   // Firebreak circles are instanced into one mesh and added only when dug.
@@ -229,6 +280,71 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     innerFlames.setMatrixAt(index, dummy.matrix);
     outerFlames.instanceMatrix.needsUpdate = true;
     innerFlames.instanceMatrix.needsUpdate = true;
+  };
+
+  let currentDelta = 0;
+  const updateFlameWall = (elapsed: number) => {
+    frontByRow.fill(-1);
+    for (const index of activeCells) {
+      const row = rowOf(index);
+      if (columnOf(index) > (frontByRow[row] < 0 ? -1 : columnOf(frontByRow[row]))) {
+        frontByRow[row] = index;
+      }
+    }
+    const wind = windVector();
+    const writeLayer = (layer: typeof outerWall, inner: boolean) => {
+      const positions = layer.positions;
+      for (let row = 0; row < GRID_SIZE; row++) {
+        const base = row * 12;
+        const index = frontByRow[row];
+        const zCenter = GRID_ORIGIN + (row + 0.5) * CELL_SIZE;
+        if (index < 0) {
+          for (let point = 0; point < 4; point++) {
+            positions[base + point * 3] = 0;
+            positions[base + point * 3 + 1] = -100;
+            positions[base + point * 3 + 2] = zCenter;
+          }
+          continue;
+        }
+        const targetX = cellX(index);
+        const frontSpeed = 0.2 + windSpeed / 35 * 0.18;
+        wallXByRow[row] += THREE.MathUtils.clamp(
+          targetX - wallXByRow[row],
+          -frontSpeed * currentDelta,
+          frontSpeed * currentDelta,
+        );
+        const x = wallXByRow[row];
+        const halfWidth = CELL_SIZE * (inner ? 0.31 : 0.57);
+        const z0 = zCenter - halfWidth;
+        const z1 = zCenter + halfWidth;
+        const ground0 = terrainHeight(x, z0) + 0.06;
+        const ground1 = terrainHeight(x, z1) + 0.06;
+        const phase = elapsed * (inner ? 2.3 : 1.8) + row * 0.67;
+        const gust = Math.sin(phase) * (inner ? 0.22 : 0.5) + Math.sin(phase * 0.43 + 1.1) * 0.24;
+        const flameHeight = ((inner ? 1.85 : 2.65) + windSpeed / 35 * (inner ? 1.2 : 2.1) +
+          Math.sin(phase * 1.7) * (inner ? 0.2 : 0.43) + Math.sin(phase * 0.61) * 0.22) * burnLifeFactor(index);
+        const frontX = x + (inner ? 0.15 : 0.05) + wind.x * (inner ? 0.22 : 0.46);
+        const topX0 = frontX + gust;
+        const topX1 = frontX - gust * 0.72 + Math.sin(phase + 1.7) * (inner ? 0.12 : 0.24);
+        const h0 = flameHeight * (0.83 + Math.sin(phase * 0.81) * 0.14);
+        const h1 = flameHeight * (0.83 + Math.sin(phase * 0.81 + 1.3) * 0.14);
+        const points = [
+          [x - 0.16, ground0, z0],
+          [x - 0.16, ground1, z1],
+          [topX1, ground1 + h1, z1],
+          [topX0, ground0 + h0, z0],
+        ];
+        for (let corner = 0; corner < 4; corner++) {
+          const offset = base + corner * 3;
+          positions[offset] = points[corner][0];
+          positions[offset + 1] = points[corner][1];
+          positions[offset + 2] = points[corner][2];
+        }
+      }
+      layer.positionAttribute.needsUpdate = true;
+    };
+    writeLayer(outerWall, false);
+    writeLayer(innerWall, true);
   };
 
   const removeActiveCell = (index: number) => {
@@ -362,8 +478,12 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     innerFlames.setColorAt(index, new THREE.Color(crown ? '#fff0a0' : '#ffd76b'));
     const x = cellX(index);
     const z = cellZ(index);
-    setFlameMatrix(outerFlames, index, x, z, terrainHeight(x, z), CELL_SIZE * 1.22, flameHeight[index], 0);
-    setFlameMatrix(innerFlames, index, x, z, terrainHeight(x, z), CELL_SIZE * 0.68, flameHeight[index] * 0.58, 0.02);
+    if (type === GRASS) {
+      hideFlame(index);
+    } else {
+      setFlameMatrix(outerFlames, index, x, z, terrainHeight(x, z), CELL_SIZE * 1.22, flameHeight[index], 0);
+      setFlameMatrix(innerFlames, index, x, z, terrainHeight(x, z), CELL_SIZE * 0.68, flameHeight[index] * 0.58, 0.02);
+    }
     emitForCell(index, true);
     statsDirty = true;
     return true;
@@ -378,6 +498,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     crownMask[index] = 0;
     removeActiveCell(index);
     hideFlame(index);
+    options.onCellBurned?.(index);
     statsDirty = true;
   };
 
@@ -417,7 +538,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   };
 
   const digAt = (x: number, z: number) => {
-    if (Math.abs(x - GRID_ORIGIN) > GRID_SIZE * CELL_SIZE || Math.abs(z - GRID_ORIGIN) > GRID_SIZE * CELL_SIZE) return;
+    const gridEnd = GRID_ORIGIN + GRID_SIZE * CELL_SIZE;
+    if (x < GRID_ORIGIN || x > gridEnd || z < GRID_ORIGIN || z > gridEnd) return;
     const start = lastDig ?? { x, z };
     const distance = Math.hypot(x - start.x, z - start.z);
     const steps = Math.max(1, Math.ceil(distance / (CELL_SIZE * 0.34)));
@@ -523,6 +645,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   };
 
   const update = (dt: number, elapsed: number, camera: any) => {
+    currentDelta = dt;
     const turnCount = activeCells.length;
     for (let slot = turnCount - 1; slot >= 0; slot--) {
       const index = activeCells[slot];
@@ -543,15 +666,17 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
 
     // Billboard flames stay camera-facing; one instance per cell keeps draw calls low.
     for (const index of activeCells) {
+      if (fuels[index] === GRASS) continue;
       const x = cellX(index);
       const z = cellZ(index);
       const ground = terrainHeight(x, z);
       const phase = elapsed * (crownMask[index] ? 9.5 : 7.1) + index * 0.73;
       const flicker = 0.88 + Math.sin(phase) * 0.075 + Math.sin(phase * 2.31) * 0.035;
-      const height = flameHeight[index] * flicker;
+      const height = flameHeight[index] * flicker * burnLifeFactor(index);
       setFlameMatrix(outerFlames, index, x, z, ground, CELL_SIZE * 1.22, height, Math.sin(phase * 0.6) * 0.1, camera);
       setFlameMatrix(innerFlames, index, x, z, ground + height * 0.015, CELL_SIZE * 0.68, height * 0.57, -Math.sin(phase) * 0.14, camera);
     }
+    updateFlameWall(elapsed);
     outerFlames.instanceMatrix.needsUpdate = true;
     innerFlames.instanceMatrix.needsUpdate = true;
 

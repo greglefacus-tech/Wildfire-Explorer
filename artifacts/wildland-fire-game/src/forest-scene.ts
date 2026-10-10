@@ -1,7 +1,15 @@
-import { createFireSimulation, getFireGridCellIndex, type FireSimulation } from './fire-simulation';
+import {
+  createFireSimulation,
+  FIRE_GRID_ORIGIN,
+  FIRE_GRID_SIZE,
+  FIRE_GRID_CELL_SIZE,
+  getFireGridCellIndex,
+  type FireSimulation,
+} from './fire-simulation';
 import type { ForestSceneCallbacks, ForestSceneHandle } from './game-types';
 
-type Collider = { x: number; z: number; radius: number; mesh?: any };
+type Collider = { x: number; z: number; radius: number; active?: boolean };
+type BushInstanceRecord = { mesh: any; instanceId: number; collider: Collider; visible: boolean };
 
 /**
  * All Three.js code is intentionally loaded in the browser from the import map.
@@ -21,8 +29,8 @@ export async function mountForest(
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color('#a8b4a0');
-  scene.fog = new THREE.FogExp2('#a8b4a0', 0.0108);
-  const camera = new THREE.PerspectiveCamera(72, 1, 0.1, 230);
+  scene.fog = new THREE.FogExp2('#a8b4a0', 0.0058);
+  const camera = new THREE.PerspectiveCamera(72, 1, 0.1, 380);
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.7));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -63,16 +71,23 @@ export async function mountForest(
   scene.add(fill);
 
   // Deterministic terrain undulation gives the walk a grounded, irregular path.
+  const hill = (x: number, z: number, cx: number, cz: number, rx: number, rz: number, height: number) =>
+    height * Math.exp(-(((x - cx) / rx) ** 2 + ((z - cz) / rz) ** 2) * 1.15);
   const terrainHeight = (x: number, z: number) =>
-    Math.sin(x * 0.095 + 0.8) * 0.62 +
-    Math.cos(z * 0.081 - 0.4) * 0.46 +
-    Math.sin((x + z) * 0.043) * 0.52 +
-    Math.cos(x * 0.21) * Math.sin(z * 0.17) * 0.13;
+    Math.sin(x * 0.045 + 0.8) * 1.15 +
+    Math.cos(z * 0.039 - 0.4) * 0.95 +
+    Math.sin((x + z) * 0.021) * 1.1 +
+    Math.cos(x * 0.11) * Math.sin(z * 0.09) * 0.32 +
+    hill(x, z, -86, -63, 38, 46, 11) +
+    hill(x, z, -22, 48, 55, 37, 8) +
+    hill(x, z, 72, -19, 46, 58, 12) +
+    hill(x, z, 12, -105, 42, 39, 7);
 
-  const terrainGeometry = new THREE.PlaneGeometry(180, 180, 112, 112);
+  const terrainGeometry = new THREE.PlaneGeometry(320, 320, 192, 192);
   terrainGeometry.rotateX(-Math.PI / 2);
   const positions = terrainGeometry.attributes.position;
-  const colors: number[] = [];
+  const terrainColors = new Float32Array(positions.count * 3);
+  const terrainVerticesByFireCell = new Map<number, number[]>();
   const base = new THREE.Color('#5d6d4d');
   const earth = new THREE.Color('#756c50');
   for (let i = 0; i < positions.count; i++) {
@@ -82,9 +97,19 @@ export async function mountForest(
     positions.setY(i, y);
     const tint = THREE.MathUtils.clamp((Math.sin(x * 0.15 + z * 0.09) + 1) * 0.18 + y * 0.07, 0, 0.55);
     const color = base.clone().lerp(earth, tint);
-    colors.push(color.r, color.g, color.b);
+    terrainColors[i * 3] = color.r;
+    terrainColors[i * 3 + 1] = color.g;
+    terrainColors[i * 3 + 2] = color.b;
+    const cell = getFireGridCellIndex(x, z);
+    if (cell >= 0) {
+      const vertices = terrainVerticesByFireCell.get(cell) ?? [];
+      vertices.push(i);
+      terrainVerticesByFireCell.set(cell, vertices);
+    }
   }
-  terrainGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const baseTerrainColors = terrainColors.slice();
+  terrainGeometry.setAttribute('color', new THREE.BufferAttribute(terrainColors, 3));
+  const terrainColorAttribute = terrainGeometry.attributes.color;
   terrainGeometry.computeVertexNormals();
   const terrain = new THREE.Mesh(terrainGeometry, new THREE.MeshStandardMaterial({
     vertexColors: true, roughness: 1, metalness: 0,
@@ -101,92 +126,130 @@ export async function mountForest(
   const colliders: Collider[] = [];
   const treeFuelPoints: { x: number; z: number; height: number }[] = [];
   const trunkGeometry = new THREE.CylinderGeometry(0.16, 0.26, 1, 7);
-  const trunkMaterial = new THREE.MeshStandardMaterial({ color: '#4d4332', roughness: 1 });
+  const trunkMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1 });
   const canopyGeometry = [
     new THREE.ConeGeometry(1.45, 2.55, 8),
     new THREE.ConeGeometry(1.17, 2.35, 8),
     new THREE.ConeGeometry(0.88, 2.05, 8),
   ];
-  const canopyMaterials = ['#20392e', '#2a4535', '#334e39'].map((color) =>
-    new THREE.MeshStandardMaterial({ color, roughness: 0.96 }),
+  const canopyMaterials = canopyGeometry.map(() =>
+    new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.96 }),
   );
+  const canopyPalettes = [
+    ['#183126', '#203a2c', '#294331'],
+    ['#20392e', '#294433', '#334c36'],
+    ['#294231', '#334b35', '#3a533a'],
+  ].map((palette) => palette.map((color) => new THREE.Color(color)));
+  const treeCount = 880;
+  const trunkInstances = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, treeCount);
+  const canopyInstances = canopyGeometry.map((geometry, layer) =>
+    new THREE.InstancedMesh(geometry, canopyMaterials[layer], treeCount),
+  );
+  trunkInstances.frustumCulled = false;
+  canopyInstances.forEach((mesh: any) => { mesh.frustumCulled = false; });
+  const placement = new THREE.Object3D();
 
-  for (let i = 0; i < 116; i++) {
+  for (let i = 0; i < treeCount; i++) {
     // Keep the opening around the starting point clear enough to orient.
     let x = 0, z = 0;
     for (let attempt = 0; attempt < 25; attempt++) {
-      x = (random() - 0.5) * 128;
-      z = (random() - 0.5) * 128;
+      x = (random() - 0.5) * 256;
+      z = (random() - 0.5) * 256;
       if (Math.hypot(x, z) > 9.5) break;
     }
     const scale = 0.78 + random() * 0.62;
     const y = terrainHeight(x, z);
     const trunkHeight = 3.5 * scale;
     treeFuelPoints.push({ x, z, height: 7.05 * scale });
-    const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
-    trunk.position.set(x, y + trunkHeight / 2, z);
-    trunk.scale.set(scale, trunkHeight, scale);
-    trunk.rotation.y = random() * Math.PI;
-    scene.add(trunk);
+    placement.position.set(x, y + trunkHeight / 2, z);
+    placement.scale.set(scale, trunkHeight, scale);
+    placement.rotation.set(0, random() * Math.PI, 0);
+    placement.updateMatrix();
+    trunkInstances.setMatrixAt(i, placement.matrix);
+    trunkInstances.setColorAt(i, new THREE.Color('#4d4332').multiplyScalar(0.88 + random() * 0.22));
     for (let layer = 0; layer < 3; layer++) {
-      const canopy = new THREE.Mesh(canopyGeometry[layer], canopyMaterials[layer]);
-      canopy.position.set(x, y + trunkHeight + 0.25 + layer * 1.23 * scale, z);
-      canopy.scale.set(scale, scale, scale);
-      canopy.rotation.y = random() * Math.PI * 2;
-      scene.add(canopy);
+      placement.position.set(x, y + trunkHeight + 0.25 + layer * 1.23 * scale, z);
+      placement.scale.set(scale, scale, scale);
+      placement.rotation.set(0, random() * Math.PI * 2, 0);
+      placement.updateMatrix();
+      canopyInstances[layer].setMatrixAt(i, placement.matrix);
+      const shade = canopyPalettes[layer][Math.floor(random() * canopyPalettes[layer].length)];
+      canopyInstances[layer].setColorAt(i, shade.clone().multiplyScalar(0.9 + random() * 0.2));
     }
     colliders.push({ x, z, radius: 0.67 * scale });
   }
+  trunkInstances.instanceMatrix.needsUpdate = true;
+  if (trunkInstances.instanceColor) trunkInstances.instanceColor.needsUpdate = true;
+  for (const mesh of canopyInstances) {
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    scene.add(mesh);
+  }
+  scene.add(trunkInstances);
 
-  // Grouped low rounded forms read as brush without overwhelming the ground.
+  // Instancing keeps the denser brush field to a single draw call.
   const bushGeometry = new THREE.IcosahedronGeometry(0.6, 1);
-  const bushMaterials = ['#506e43', '#597647', '#647e4d', '#4b6742'].map((color) =>
-    new THREE.MeshStandardMaterial({ color, roughness: 1, flatShading: true }),
-  );
+  const bushMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1, flatShading: true });
+  const bushCount = 1100;
+  const bushInstances = new THREE.InstancedMesh(bushGeometry, bushMaterial, bushCount);
+  bushInstances.frustumCulled = false;
   const bushFuelPoints: { x: number; z: number }[] = [];
-  const bushesByCell = new Map<number, any[]>();
-  for (let i = 0; i < 148; i++) {
-    const x = (random() - 0.5) * 126;
-    const z = (random() - 0.5) * 126;
+  const bushesByCell = new Map<number, BushInstanceRecord[]>();
+  let bushInstanceCount = 0;
+  const bushPalette = ['#506e43', '#597647', '#647e4d', '#4b6742'].map((color) => new THREE.Color(color));
+  for (let i = 0; i < bushCount; i++) {
+    const x = (random() - 0.5) * 256;
+    const z = (random() - 0.5) * 256;
     if (Math.hypot(x, z) < 5.5) continue;
     const y = terrainHeight(x, z);
     const scale = 0.48 + random() * 0.75;
-    const bush = new THREE.Mesh(bushGeometry, bushMaterials[Math.floor(random() * bushMaterials.length)]);
-    bush.position.set(x, y + 0.35 * scale, z);
-    bush.scale.set(scale * 1.25, scale * 0.72, scale);
-    bush.rotation.y = random() * 5;
-    scene.add(bush);
+    const instanceId = bushInstanceCount++;
+    placement.position.set(x, y + 0.35 * scale, z);
+    placement.scale.set(scale * 1.25, scale * 0.72, scale);
+    placement.rotation.set(0, random() * 5, 0);
+    placement.updateMatrix();
+    bushInstances.setMatrixAt(instanceId, placement.matrix);
+    bushInstances.setColorAt(instanceId, bushPalette[Math.floor(random() * bushPalette.length)]);
     bushFuelPoints.push({ x, z });
-    colliders.push({ x, z, radius: 0.55 * scale, mesh: bush });
+    const collider: Collider = { x, z, radius: 0.55 * scale, active: true };
+    colliders.push(collider);
+    const record: BushInstanceRecord = { mesh: bushInstances, instanceId, collider, visible: true };
     const centerCell = getFireGridCellIndex(x, z);
     if (centerCell >= 0) {
-      const centerColumn = centerCell % 64;
-      const centerRow = Math.floor(centerCell / 64);
+      const centerColumn = centerCell % FIRE_GRID_SIZE;
+      const centerRow = Math.floor(centerCell / FIRE_GRID_SIZE);
       for (let dz = -1; dz <= 1; dz++) {
         for (let dx = -1; dx <= 1; dx++) {
           const column = centerColumn + dx;
           const row = centerRow + dz;
-          if (column < 0 || column >= 64 || row < 0 || row >= 64) continue;
-          const nearbyCell = row * 64 + column;
+          if (column < 0 || column >= FIRE_GRID_SIZE || row < 0 || row >= FIRE_GRID_SIZE) continue;
+          const nearbyX = FIRE_GRID_ORIGIN + (column + 0.5) * FIRE_GRID_CELL_SIZE;
+          const nearbyZ = FIRE_GRID_ORIGIN + (row + 0.5) * FIRE_GRID_CELL_SIZE;
+          if (Math.hypot(nearbyX - x, nearbyZ - z) > 3.6) continue;
+          const nearbyCell = row * FIRE_GRID_SIZE + column;
           const bucket = bushesByCell.get(nearbyCell) ?? [];
-          bucket.push(bush);
+          bucket.push(record);
           bushesByCell.set(nearbyCell, bucket);
         }
       }
     }
   }
+  bushInstances.count = bushInstanceCount;
+  bushInstances.instanceMatrix.needsUpdate = true;
+  if (bushInstances.instanceColor) bushInstances.instanceColor.needsUpdate = true;
+  scene.add(bushInstances);
 
-  // Blade triangles are assembled into one mesh for a light, patchy understory.
+  // One larger blade mesh fills the widened map without adding draw calls.
   const grassVertices: number[] = [];
   const grassColors: number[] = [];
   const grassBladesByCell = new Map<number, number[]>();
   const grassFuelPoints: { x: number; z: number }[] = [];
   const grassPalette = [new THREE.Color('#91a760'), new THREE.Color('#a2b56c'), new THREE.Color('#809b56')];
-  for (let patch = 0; patch < 190; patch++) {
-    const cx = (random() - 0.5) * 145;
-    const cz = (random() - 0.5) * 145;
+  for (let patch = 0; patch < 620; patch++) {
+    const cx = (random() - 0.5) * 290;
+    const cz = (random() - 0.5) * 290;
     grassFuelPoints.push({ x: cx, z: cz });
-    const count = 8 + Math.floor(random() * 11);
+    const count = 14 + Math.floor(random() * 13);
     for (let blade = 0; blade < count; blade++) {
       const x = cx + (random() - 0.5) * 2.4;
       const z = cz + (random() - 0.5) * 2.4;
@@ -219,6 +282,29 @@ export async function mountForest(
   scene.add(grassMesh);
 
   const grassPosition = grassGeometry.attributes.position;
+  const removeGrassAtCell = (cell: number) => {
+    const blades = grassBladesByCell.get(cell);
+    if (!blades?.length) return;
+    for (const firstVertex of blades) {
+      for (let vertex = 0; vertex < 3; vertex++) grassPosition.setY(firstVertex + vertex, -5);
+    }
+    grassPosition.needsUpdate = true;
+  };
+  const hideBushesAtCell = (cell: number) => {
+    for (const bush of bushesByCell.get(cell) ?? []) {
+      if (!bush.visible) continue;
+      bush.visible = false;
+      bush.collider.active = false;
+      placement.position.set(0, -100, 0);
+      placement.scale.set(0, 0, 0);
+      placement.rotation.set(0, 0, 0);
+      placement.updateMatrix();
+      bush.mesh.setMatrixAt(bush.instanceId, placement.matrix);
+      bush.mesh.instanceMatrix.needsUpdate = true;
+    }
+  };
+  const terrainBurnFades: { vertices: number[]; age: number }[] = [];
+  const charredColor = new THREE.Color('#20221d');
   const fireSystem: FireSimulation = createFireSimulation({
     THREE,
     scene,
@@ -229,14 +315,14 @@ export async function mountForest(
     grassPatches: grassFuelPoints,
     onStats: callbacks.onFireStats,
     onDigCell: (cell) => {
-      const blades = grassBladesByCell.get(cell);
-      if (blades) {
-        for (const firstVertex of blades) {
-          for (let vertex = 0; vertex < 3; vertex++) grassPosition.setY(firstVertex + vertex, -5);
-        }
-        grassPosition.needsUpdate = true;
-      }
-      for (const bush of bushesByCell.get(cell) ?? []) bush.visible = false;
+      removeGrassAtCell(cell);
+      hideBushesAtCell(cell);
+    },
+    onCellBurned: (cell) => {
+      const vertices = terrainVerticesByFireCell.get(cell);
+      if (vertices?.length) terrainBurnFades.push({ vertices, age: 0 });
+      removeGrassAtCell(cell);
+      hideBushesAtCell(cell);
     },
   });
 
@@ -354,9 +440,9 @@ export async function mountForest(
         controls.moveForward(forward * distance);
         controls.moveRight(side * distance);
         const pos = controls.object.position;
-        const outside = Math.abs(pos.x) > 83 || Math.abs(pos.z) > 83;
+        const outside = Math.abs(pos.x) > 148 || Math.abs(pos.z) > 148;
         const blocked = colliders.some((item) =>
-          (!item.mesh || item.mesh.visible) && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
+          item.active !== false && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
         );
         if (outside || blocked) {
           // Slide along obstacles and keep the patrol inside the clearing.
@@ -365,12 +451,12 @@ export async function mountForest(
           pos.copy(before);
           pos.x = tryX;
           if (colliders.some((item) =>
-            (!item.mesh || item.mesh.visible) && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
-          ) || Math.abs(pos.x) > 83) pos.x = before.x;
+            item.active !== false && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
+          ) || Math.abs(pos.x) > 148) pos.x = before.x;
           pos.z = tryZ;
           if (colliders.some((item) =>
-            (!item.mesh || item.mesh.visible) && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
-          ) || Math.abs(pos.z) > 83) pos.z = before.z;
+            item.active !== false && Math.hypot(pos.x - item.x, pos.z - item.z) < item.radius + 0.48,
+          ) || Math.abs(pos.z) > 148) pos.z = before.z;
         }
         pos.y = terrainHeight(pos.x, pos.z) + 1.68;
       }
@@ -384,6 +470,24 @@ export async function mountForest(
       mcleod.rotation.x = 0.02;
       mcleod.rotation.z = -0.48;
     }
+    let terrainColorChanged = false;
+    for (let i = terrainBurnFades.length - 1; i >= 0; i--) {
+      const fade = terrainBurnFades[i];
+      fade.age += dt;
+      const progress = Math.min(1, fade.age / 7.5);
+      for (const vertex of fade.vertices) {
+        const offset = vertex * 3;
+        terrainColors[offset] = baseTerrainColors[offset] * (1 - progress) + charredColor.r * progress;
+        terrainColors[offset + 1] = baseTerrainColors[offset + 1] * (1 - progress) + charredColor.g * progress;
+        terrainColors[offset + 2] = baseTerrainColors[offset + 2] * (1 - progress) + charredColor.b * progress;
+      }
+      terrainColorChanged = true;
+      if (progress >= 1) {
+        terrainBurnFades[i] = terrainBurnFades[terrainBurnFades.length - 1];
+        terrainBurnFades.pop();
+      }
+    }
+    if (terrainColorChanged) terrainColorAttribute.needsUpdate = true;
     fireSystem.update(dt, now / 1000, camera);
     renderer.render(scene, camera);
   };
