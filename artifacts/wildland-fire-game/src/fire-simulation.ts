@@ -125,8 +125,12 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const crownMask = new Uint8Array(CELL_COUNT);
   const age = new Float32Array(CELL_COUNT);
   const burnDuration = new Float32Array(CELL_COUNT);
+  const burnProgress = new Float32Array(CELL_COUNT);
+  const ignitionProgress = new Float32Array(CELL_COUNT);
+  const spreadVelocityX = new Float32Array(CELL_COUNT);
+  const spreadVelocityZ = new Float32Array(CELL_COUNT);
+  const spreadSlope = new Float32Array(CELL_COUNT);
   const flameHeight = new Float32Array(CELL_COUNT);
-  const spreadClock = new Float32Array(CELL_COUNT);
   const emissionClock = new Float32Array(CELL_COUNT);
   const emberSpotCooldown = new Float32Array(CELL_COUNT);
   const wetnessTimer = new Float32Array(CELL_COUNT);
@@ -144,6 +148,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   let crownCount = 0;
   let firebreakCount = 0;
   let statsClock = 0;
+  let spreadFieldClock = 0;
   let statsDirty = true;
 
   const cellX = (index: number) => GRID_ORIGIN + (index % GRID_SIZE + 0.5) * CELL_SIZE;
@@ -192,6 +197,12 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   let ribbonIndices = new Uint32Array(8192);
   const ribbonHeightSums = new Float32Array(RIBBON_NODE_COUNT);
   const ribbonHeightCounts = new Uint8Array(RIBBON_NODE_COUNT);
+  const ribbonContourOffsetsX = new Float32Array(RIBBON_NODE_COUNT);
+  const ribbonContourOffsetsZ = new Float32Array(RIBBON_NODE_COUNT);
+  const ribbonContourOffsetCounts = new Uint8Array(RIBBON_NODE_COUNT);
+  const ribbonNeighborX = new Float32Array(RIBBON_NODE_COUNT);
+  const ribbonNeighborZ = new Float32Array(RIBBON_NODE_COUNT);
+  const ribbonNeighborCounts = new Uint8Array(RIBBON_NODE_COUNT);
   const ribbonEdgeStarts = new Int32Array(MAX_BOUNDARY_EDGES);
   const ribbonEdgeEnds = new Int32Array(MAX_BOUNDARY_EDGES);
   let ribbonIndexAttribute = new THREE.BufferAttribute(ribbonIndices, 1).setUsage(THREE.DynamicDrawUsage);
@@ -296,15 +307,21 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   let ribbonRefreshClock = 0;
 
   const burnLifeFactor = (index: number) => {
-    const progress = age[index] / Math.max(1, burnDuration[index]);
+    const progress = burnProgress[index];
     return progress <= 0.68 ? 1 : Math.max(0.24, 1 - ((progress - 0.68) / 0.32) * 0.76);
   };
 
   const rebuildFireFront = () => {
     ribbonHeightSums.fill(0);
     ribbonHeightCounts.fill(0);
+    ribbonContourOffsetsX.fill(0);
+    ribbonContourOffsetsZ.fill(0);
+    ribbonContourOffsetCounts.fill(0);
+    ribbonNeighborX.fill(0);
+    ribbonNeighborZ.fill(0);
+    ribbonNeighborCounts.fill(0);
     let edgeCount = 0;
-    const addEdge = (start: number, end: number, index: number) => {
+    const addEdge = (start: number, end: number, index: number, dx: number, dz: number) => {
       ribbonEdgeStarts[edgeCount] = start;
       ribbonEdgeEnds[edgeCount] = end;
       edgeCount++;
@@ -313,6 +330,29 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       ribbonHeightSums[end] += height;
       ribbonHeightCounts[start]++;
       ribbonHeightCounts[end]++;
+      const startColumn = start % (GRID_SIZE + 1);
+      const startRow = Math.floor(start / (GRID_SIZE + 1));
+      const endColumn = end % (GRID_SIZE + 1);
+      const endRow = Math.floor(end / (GRID_SIZE + 1));
+      ribbonNeighborX[start] += GRID_ORIGIN + endColumn * CELL_SIZE;
+      ribbonNeighborZ[start] += GRID_ORIGIN + endRow * CELL_SIZE;
+      ribbonNeighborX[end] += GRID_ORIGIN + startColumn * CELL_SIZE;
+      ribbonNeighborZ[end] += GRID_ORIGIN + startRow * CELL_SIZE;
+      ribbonNeighborCounts[start]++;
+      ribbonNeighborCounts[end]++;
+      const neighborColumn = columnOf(index) + dx;
+      const neighborRow = rowOf(index) + dz;
+      if (neighborColumn >= 0 && neighborColumn < GRID_SIZE && neighborRow >= 0 && neighborRow < GRID_SIZE) {
+        const neighbor = neighborRow * GRID_SIZE + neighborColumn;
+        if (states[neighbor] === UNBURNED && fuels[neighbor] !== NO_FUEL) {
+          const offset = ignitionProgress[neighbor] * CELL_SIZE * 0.34;
+          for (const node of [start, end]) {
+            ribbonContourOffsetsX[node] += dx * offset;
+            ribbonContourOffsetsZ[node] += dz * offset;
+            ribbonContourOffsetCounts[node]++;
+          }
+        }
+      }
     };
 
     for (const index of activeCells) {
@@ -322,10 +362,10 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       const topRight = topLeft + 1;
       const bottomLeft = topLeft + GRID_SIZE + 1;
       const bottomRight = bottomLeft + 1;
-      if (row === 0 || states[index - GRID_SIZE] !== BURNING) addEdge(topLeft, topRight, index);
-      if (column === GRID_SIZE - 1 || states[index + 1] !== BURNING) addEdge(topRight, bottomRight, index);
-      if (row === GRID_SIZE - 1 || states[index + GRID_SIZE] !== BURNING) addEdge(bottomRight, bottomLeft, index);
-      if (column === 0 || states[index - 1] !== BURNING) addEdge(bottomLeft, topLeft, index);
+      if (row === 0 || states[index - GRID_SIZE] !== BURNING) addEdge(topLeft, topRight, index, 0, -1);
+      if (column === GRID_SIZE - 1 || states[index + 1] !== BURNING) addEdge(topRight, bottomRight, index, 1, 0);
+      if (row === GRID_SIZE - 1 || states[index + GRID_SIZE] !== BURNING) addEdge(bottomRight, bottomLeft, index, 0, 1);
+      if (column === 0 || states[index - 1] !== BURNING) addEdge(bottomLeft, topLeft, index, -1, 0);
     }
 
     fireFrontLength = edgeCount * CELL_SIZE;
@@ -334,8 +374,19 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       if (!count) continue;
       const column = node % (GRID_SIZE + 1);
       const row = Math.floor(node / (GRID_SIZE + 1));
-      const x = GRID_ORIGIN + column * CELL_SIZE;
-      const z = GRID_ORIGIN + row * CELL_SIZE;
+      let x = GRID_ORIGIN + column * CELL_SIZE;
+      let z = GRID_ORIGIN + row * CELL_SIZE;
+      const offsetCount = ribbonContourOffsetCounts[node];
+      if (offsetCount) {
+        x += ribbonContourOffsetsX[node] / offsetCount;
+        z += ribbonContourOffsetsZ[node] / offsetCount;
+      }
+      const neighborCount = ribbonNeighborCounts[node];
+      if (neighborCount) {
+        const smooth = 0.18;
+        x += (ribbonNeighborX[node] / neighborCount - x) * smooth;
+        z += (ribbonNeighborZ[node] / neighborCount - z) * smooth;
+      }
       const ground = terrainHeight(x, z);
       const height = ribbonHeightSums[node] / count;
       const seedValue = Math.sin(node * 127.1 + 311.7) * 43758.5453;
@@ -999,7 +1050,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     states[index] = BURNING;
     crownMask[index] = crown ? 1 : 0;
     age[index] = 0;
-    spreadClock[index] = 1.8 + random() * 1.2;
+    burnProgress[index] = 0;
+    ignitionProgress[index] = 0;
     emissionClock[index] = 0;
     let duration = type === GRASS ? 14 + random() * 7
       : type === BRUSH ? 20 + random() * 10
@@ -1085,6 +1137,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const finishBurn = (index: number) => {
     states[index] = BURNED;
     fuels[index] = NO_FUEL;
+    burnProgress[index] = 1;
+    ignitionProgress[index] = 0;
     burnedCount++;
     burningCount = Math.max(0, burningCount - 1);
     if (crownMask[index]) crownCount = Math.max(0, crownCount - 1);
@@ -1122,6 +1176,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     states[index] = FIREBREAK;
     fuels[index] = NO_FUEL;
     crownMask[index] = 0;
+    ignitionProgress[index] = 0;
+    burnProgress[index] = 0;
     firebreakCount++;
     addDirtPatch(index);
     options.onDigCell?.(index);
@@ -1317,45 +1373,68 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     for (const targetIndex of landedSpotTargets) onSpotLanded?.(targetIndex);
   };
 
-  const attemptSpread = (sourceIndex: number) => {
-    const column = columnOf(sourceIndex);
-    const row = rowOf(sourceIndex);
-    const wind = windVector();
-    const windStrength = windSpeed / 35;
-    // The west-edge line advances east. Adjacent diagonals overlap the cells
-    // along the front, while reverse spread and isolated spot fires are disabled.
-    const directions = [[1, -1], [1, 0], [1, 1]];
-    const sourceHeight = cellGround[sourceIndex];
-    let fastestSlopeMultiplier = 1;
-    for (const [dx, dz] of directions) {
-      const nextColumn = column + dx;
-      const nextRow = row + dz;
-      if (nextColumn < 0 || nextColumn >= GRID_SIZE || nextRow < 0 || nextRow >= GRID_SIZE) continue;
-      const next = nextRow * GRID_SIZE + nextColumn;
-      if (wetnessTimer[next] > 0) continue;
-      const targetFuel = fuels[next];
-      if (states[next] !== UNBURNED || targetFuel === NO_FUEL) continue;
-      const length = Math.hypot(dx, dz);
-      const alignment = (dx / length) * wind.x + (dz / length) * wind.z;
-      const directional = alignment >= 0
-        ? 1 + alignment * windStrength * 2.75
-        : Math.max(0.08, 1 + alignment * windStrength * 0.9);
-      const baseProbability = targetFuel === GRASS ? 0.04 : targetFuel === BRUSH ? 0.48 : 0.72;
-      const elevationDelta = cellGround[next] - sourceHeight;
-      const slopeFactor = elevationDelta > 0
-        ? 1 + Math.min(elevationDelta, 1.5) * 1.5
-        : elevationDelta < 0 ? 0.5 : 1;
-      fastestSlopeMultiplier = Math.max(fastestSlopeMultiplier, slopeFactor);
-      const crownFactor = crownMask[sourceIndex] ? 1.65 : 1;
-      const windFactor = 0.75 + windStrength * 1.25;
-      const diagonalPenalty = length > 1 ? 0.76 : 1;
-      const probability = Math.min(
-        0.92,
-        baseProbability * directional * slopeFactor * crownFactor * windFactor * diagonalPenalty,
-      );
-      if (random() < probability) ignite(next, Math.max(0, elevationDelta));
+  const updateContinuousSpread = (dt: number) => {
+    spreadFieldClock += dt;
+    if (spreadFieldClock >= 0.16) {
+      spreadFieldClock -= 0.16;
+      spreadVelocityX.fill(0);
+      spreadVelocityZ.fill(0);
+      spreadSlope.fill(0);
+      const wind = windVector();
+      const windStrength = windSpeed / 35;
+      const radiusCells = 3;
+
+      for (const source of activeCells) {
+        const sourceColumn = columnOf(source);
+        const sourceRow = rowOf(source);
+        const sourceFuel = fuels[source];
+        const sourceIntensity = (crownMask[source] ? 1.45 : sourceFuel === TREE ? 1.2 : sourceFuel === BRUSH ? 1.08 : 0.92) * burnLifeFactor(source);
+        for (let dz = -radiusCells; dz <= radiusCells; dz++) {
+          const row = sourceRow + dz;
+          if (row < 0 || row >= GRID_SIZE) continue;
+          for (let dx = -radiusCells; dx <= radiusCells; dx++) {
+            const column = sourceColumn + dx;
+            if (column < 0 || column >= GRID_SIZE || (!dx && !dz)) continue;
+            const target = row * GRID_SIZE + column;
+            if (states[target] !== UNBURNED || fuels[target] === NO_FUEL || wetnessTimer[target] > 0) continue;
+
+            const distance = Math.hypot(dx, dz) * CELL_SIZE;
+            if (distance > CELL_SIZE * 3.25) continue;
+            const directionX = (dx * CELL_SIZE) / distance;
+            const directionZ = (dz * CELL_SIZE) / distance;
+            const uphillSlope = (cellGround[target] - cellGround[source]) / distance;
+            const windAlignment = directionX * wind.x + directionZ * wind.z;
+            const windFactor = THREE.MathUtils.clamp(1 + windStrength * windAlignment * 2.1, 0.16, 3.2);
+            const slopeFactor = Math.exp(THREE.MathUtils.clamp(uphillSlope * 5.4, -1.25, 1.45));
+            const fuelSpeed = fuels[target] === GRASS ? 0.78 : fuels[target] === BRUSH ? 0.96 : 1.12;
+            const distanceFalloff = Math.exp(-distance / (CELL_SIZE * 2.15));
+            const speed = fuelSpeed * sourceIntensity * windFactor * slopeFactor * distanceFalloff;
+            spreadVelocityX[target] += directionX * speed;
+            spreadVelocityZ[target] += directionZ * speed;
+            spreadSlope[target] = Math.max(spreadSlope[target], uphillSlope);
+          }
+        }
+      }
     }
-    return fastestSlopeMultiplier;
+
+    const ignitionQueue: number[] = [];
+    for (let index = 0; index < CELL_COUNT; index++) {
+      if (states[index] !== UNBURNED || fuels[index] === NO_FUEL) {
+        if (states[index] !== BURNING) ignitionProgress[index] = 0;
+        continue;
+      }
+      const speed = Math.min(1.4, Math.hypot(spreadVelocityX[index], spreadVelocityZ[index]));
+      if (speed > 0.025 && wetnessTimer[index] <= 0) {
+        ignitionProgress[index] = Math.min(1, ignitionProgress[index] + (dt * speed * 0.48) / CELL_SIZE);
+      } else {
+        const cooling = wetnessTimer[index] > 0 ? 0.5 : 0.075;
+        ignitionProgress[index] = Math.max(0, ignitionProgress[index] - dt * cooling);
+      }
+      if (ignitionProgress[index] >= 1) ignitionQueue.push(index);
+    }
+    for (const index of ignitionQueue) {
+      if (ignite(index, spreadSlope[index])) ignitionProgress[index] = 0;
+    }
   };
 
   const update = (dt: number, elapsed: number, camera: any) => {
@@ -1370,17 +1449,17 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const turnCount = activeCells.length;
     for (let slot = turnCount - 1; slot >= 0; slot--) {
       const index = activeCells[slot];
+      let burnTimeScale = 1;
       if (wetnessTimer[index] > 0) {
         const radiantHeat = getRadiantHeatAtCell(index);
         const damp = Math.min(1, wetnessTimer[index] / MAX_WETNESS);
         const flameResistance = Math.min(1, flameHeight[index] / 11);
         const suppression = Math.max(0, (0.7 + damp * 2.2) * (1 - flameResistance * 0.52) * Math.max(0.18, 1 - radiantHeat * 0.72));
-        age[index] -= dt * suppression;
-        spreadClock[index] += dt * (0.8 + damp * 2.1 + radiantHeat * 1.5);
+        burnTimeScale = 1 - suppression;
         emissionClock[index] += dt * (0.9 + damp * 2.0 + radiantHeat * 1.2);
       }
-      age[index] += dt;
-      spreadClock[index] -= dt;
+      age[index] = Math.max(0, age[index] + dt * burnTimeScale);
+      burnProgress[index] = THREE.MathUtils.clamp(age[index] / Math.max(1, burnDuration[index]), 0, 1);
       emissionClock[index] += dt;
       emberSpotCooldown[index] = Math.max(0, emberSpotCooldown[index] - dt);
       const emissionInterval = crownMask[index] ? 0.18 : fuels[index] === TREE ? 0.38 : fuels[index] === BRUSH ? 0.55 : 1.0;
@@ -1399,15 +1478,12 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         const spawnChance = crownMask[index] ? 0.85 : fuels[index] === BRUSH ? 0.45 : 0.32;
         if (random() < spawnChance) spawnSpottingEmber(index);
       }
-      if (spreadClock[index] <= 0) {
-        const slopeMultiplier = attemptSpread(index);
-        spreadClock[index] = (2.1 + random() * 1.2) / slopeMultiplier;
-      }
       if (age[index] >= burnDuration[index]) {
         finishBurn(index);
         continue;
       }
     }
+    updateContinuousSpread(dt);
 
     // Only burning cells are visited; the full grid is never scanned per frame.
     let nearestDist = 1e9;
