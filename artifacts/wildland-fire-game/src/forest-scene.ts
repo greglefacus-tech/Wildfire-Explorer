@@ -80,13 +80,14 @@ export async function mountForest(
   mcleod.rotation.set(0.02, 0.08, -0.48);
   camera.add(mcleod);
   const hose = new THREE.Group();
-  hose.position.set(0.72, -0.34, -1.05);
+  hose.position.set(0.36, -0.28, -0.8);
+  hose.scale.setScalar(0.78);
   hose.visible = false;
   camera.add(hose);
   const handleMaterial = new THREE.MeshStandardMaterial({ color: '#795632', roughness: 0.88 });
   const steelMaterial = new THREE.MeshStandardMaterial({ color: '#aeb9b5', metalness: 0.86, roughness: 0.38 });
-  const hoseMaterial = new THREE.MeshStandardMaterial({ color: '#a71116', roughness: 0.6, metalness: 0.3 });
-  const brassMaterial = new THREE.MeshStandardMaterial({ color: '#b89445', roughness: 0.35, metalness: 0.9 });
+  const hoseMaterial = new THREE.MeshStandardMaterial({ color: '#a71116', emissive: '#320609', emissiveIntensity: 0.65, roughness: 0.6, metalness: 0.3 });
+  const brassMaterial = new THREE.MeshStandardMaterial({ color: '#b89445', emissive: '#5a3509', emissiveIntensity: 0.45, roughness: 0.4, metalness: 0.65 });
   const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.027, 0.9, 8), handleMaterial);
   handle.position.set(0, 0.28, 0);
   handle.rotation.z = -0.08;
@@ -100,24 +101,27 @@ export async function mountForest(
     tine.position.set(-0.19 + tooth * 0.05, 0.635, 0);
     mcleod.add(tine);
   }
-  const hoseTube = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.075, 1.3, 16), hoseMaterial);
-  hoseTube.rotation.z = Math.PI / 2;
-  hoseTube.position.set(0.28, -0.02, -0.1);
+  const hoseTube = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.075, 1.1, 16), hoseMaterial);
+  hoseTube.rotation.x = -Math.PI / 2;
+  hoseTube.position.set(0, -0.02, 0);
   hose.add(hoseTube);
-  const hoseConnector = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.052, 0.26, 12), brassMaterial);
-  hoseConnector.rotation.z = Math.PI / 2;
-  hoseConnector.position.set(0.84, -0.02, -0.06);
+  const hoseConnector = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.052, 0.22, 12), brassMaterial);
+  hoseConnector.rotation.x = -Math.PI / 2;
+  hoseConnector.position.set(0, -0.02, -0.65);
   hose.add(hoseConnector);
-  const nozzleBody = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.038, 0.34, 10), brassMaterial);
-  nozzleBody.rotation.z = Math.PI / 2;
-  nozzleBody.position.set(1.02, -0.02, -0.06);
+  const nozzleBody = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.038, 0.3, 10), brassMaterial);
+  nozzleBody.rotation.x = -Math.PI / 2;
+  nozzleBody.position.set(0, -0.02, -0.91);
   hose.add(nozzleBody);
-  const nozzleTip = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.14, 10), brassMaterial);
-  nozzleTip.rotation.z = Math.PI / 2;
-  nozzleTip.position.set(1.26, -0.02, -0.06);
+  const nozzleTip = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.12, 10), brassMaterial);
+  nozzleTip.rotation.x = -Math.PI / 2;
+  nozzleTip.position.set(0, -0.02, -1.15);
   hose.add(nozzleTip);
+  const nozzleOutlet = new THREE.Object3D();
+  nozzleOutlet.position.y = 0.06;
+  nozzleTip.add(nozzleOutlet);
   const triggerGuard = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.09, 0.12), hoseMaterial);
-  triggerGuard.position.set(0.98, 0.08, -0.06);
+  triggerGuard.position.set(0.05, 0.08, -0.91);
   hose.add(triggerGuard);
 
   const hemi = new THREE.HemisphereLight(0xc24a18, 0x140804, 0.62);
@@ -517,6 +521,10 @@ export async function mountForest(
   let menuOpen = false;
   let trenching = false;
   let waterSpraying = false;
+  const waterDirection = new THREE.Vector3();
+  const waterOrigin = new THREE.Vector3();
+  const waterAimPoint = new THREE.Vector3();
+  const cameraWorldPosition = new THREE.Vector3();
   let activeTool: ToolSelection = 'mcleod';
   let lockedCallback = (_locked: boolean) => {};
   callbacks.onToolChange?.(activeTool);
@@ -690,20 +698,16 @@ export async function mountForest(
       }
     }
     if (activeTool === 'hose' && waterSpraying && controls.isLocked) {
-      const direction = new THREE.Vector3();
-      camera.getWorldDirection(direction);
-      const nozzleLocal = new THREE.Vector3(1.28, -0.02, -0.06);
-      const hoseTip = nozzleLocal.clone().applyQuaternion(camera.quaternion).add(camera.position);
-      const origin = hoseTip.clone();
-      fireSystem.sprayWater(origin, direction, dt);
+      controls.object.updateMatrixWorld(true);
+      camera.getWorldPosition(cameraWorldPosition);
+      camera.getWorldDirection(waterDirection);
+      nozzleOutlet.getWorldPosition(waterOrigin);
+      waterAimPoint.copy(cameraWorldPosition).addScaledVector(waterDirection, 45);
+      waterDirection.copy(waterAimPoint).sub(waterOrigin).normalize();
+      fireSystem.sprayWater(waterOrigin, waterDirection, dt);
     }
     if (trenching) digAtPlayer();
-    if (activeTool === 'hose') {
-      hose.position.set(0.72, -0.34, -1.05);
-      hose.quaternion.copy(camera.quaternion);
-      hose.rotateY(-0.15);
-      hose.rotateX(0.22);
-    } else if (trenching) {
+    if (trenching) {
       const stroke = Math.sin(now * 0.018);
       mcleod.rotation.x = 0.02 + stroke * 0.14;
       mcleod.rotation.z = -0.48 + Math.abs(stroke) * 0.12;
