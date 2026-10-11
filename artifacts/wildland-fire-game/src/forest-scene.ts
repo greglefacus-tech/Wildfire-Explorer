@@ -739,8 +739,9 @@ export async function mountForest(
     fog.color.copy(targetFog);
     fog.density = atmosphere.fogDensity;
     scene.background.copy(targetFog);
-    hemi.intensity = 0.48 + atmosphere.heat * 0.55 + atmosphere.smog * 0.08;
-    hemi.color.setHex(atmosphere.heat > 0.45 ? 0xff6a1c : 0xc24a18);
+    const frontGlow = THREE.MathUtils.clamp(atmosphere.glowStrength / 8, 0, 1);
+    hemi.intensity = 0.48 + atmosphere.heat * 0.55 + atmosphere.smog * 0.08 + frontGlow * 0.24;
+    hemi.color.setHex(atmosphere.heat > 0.45 || frontGlow > 0.25 ? 0xff6a1c : 0xc24a18);
     sun.intensity = 0.22 + (1 - atmosphere.smog) * 0.28 - atmosphere.heat * 0.08;
     sun.color.setHex(atmosphere.smog > 0.4 ? 0xc46a28 : 0xff9a4a);
     fireGlow.position.set(atmosphere.glowX, atmosphere.glowY, atmosphere.glowZ);

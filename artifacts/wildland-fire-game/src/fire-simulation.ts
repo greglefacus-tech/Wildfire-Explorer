@@ -115,7 +115,7 @@ const FIREBREAK = 3;
 
 /**
  * A small cellular-automata fire model. The simulation grid is invisible;
- * instanced flame billboards, pooled pyrocumulus columns, and atmospheric
+ * one connected perimeter ribbon, pooled smoke columns, and atmospheric
  * particles provide the visuals.
  */
 export function createFireSimulation(options: FireSystemOptions): FireSimulation {
@@ -177,14 +177,31 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       }
     }
   };
-
   grassPatches.forEach((point) => paintFuel(point, GRASS, 1.45));
   bushes.forEach((point) => paintFuel(point, BRUSH, 1.05));
   trees.forEach((point) => paintFuel(point, TREE, 1.18));
 
-  const plane = new THREE.PlaneGeometry(1, 1);
-  const flameRibbonGeometry = new THREE.PlaneGeometry(1, 1, 2, 3);
-  const flameTexture = createFlameTexture(THREE);
+  const RIBBON_VERTICAL_STEPS = 6;
+  const RIBBON_VERTICES_PER_NODE = RIBBON_VERTICAL_STEPS + 1;
+  const RIBBON_NODE_COUNT = (GRID_SIZE + 1) * (GRID_SIZE + 1);
+  const MAX_BOUNDARY_EDGES = CELL_COUNT * 4;
+  const ribbonPositions = new Float32Array(RIBBON_NODE_COUNT * RIBBON_VERTICES_PER_NODE * 3);
+  const ribbonUvs = new Float32Array(RIBBON_NODE_COUNT * RIBBON_VERTICES_PER_NODE * 2);
+  const ribbonHeights = new Float32Array(RIBBON_NODE_COUNT * RIBBON_VERTICES_PER_NODE);
+  const ribbonSeeds = new Float32Array(RIBBON_NODE_COUNT * RIBBON_VERTICES_PER_NODE);
+  let ribbonIndices = new Uint32Array(8192);
+  const ribbonHeightSums = new Float32Array(RIBBON_NODE_COUNT);
+  const ribbonHeightCounts = new Uint8Array(RIBBON_NODE_COUNT);
+  const ribbonEdgeStarts = new Int32Array(MAX_BOUNDARY_EDGES);
+  const ribbonEdgeEnds = new Int32Array(MAX_BOUNDARY_EDGES);
+  let ribbonIndexAttribute = new THREE.BufferAttribute(ribbonIndices, 1).setUsage(THREE.DynamicDrawUsage);
+  const flameGeometry = new THREE.BufferGeometry();
+  flameGeometry.setAttribute('position', new THREE.BufferAttribute(ribbonPositions, 3).setUsage(THREE.DynamicDrawUsage));
+  flameGeometry.setAttribute('uv', new THREE.BufferAttribute(ribbonUvs, 2).setUsage(THREE.DynamicDrawUsage));
+  flameGeometry.setAttribute('aHeight', new THREE.BufferAttribute(ribbonHeights, 1).setUsage(THREE.DynamicDrawUsage));
+  flameGeometry.setAttribute('aSeed', new THREE.BufferAttribute(ribbonSeeds, 1).setUsage(THREE.DynamicDrawUsage));
+  flameGeometry.setIndex(ribbonIndexAttribute);
+  flameGeometry.setDrawRange(0, 0);
   const flameMaterial = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -192,149 +209,183 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     blending: THREE.AdditiveBlending,
     uniforms: {
       uTime: { value: 0 },
-      uOpacity: { value: 1.0 },
-      uColorA: { value: new THREE.Color('#ffb039') },
-      uColorB: { value: new THREE.Color('#ff5a14') },
+      uWind: { value: new THREE.Vector2() },
+      uLean: { value: 0.12 },
+      uIntensity: { value: 1 },
     },
     vertexShader: `
       uniform float uTime;
+      uniform vec2 uWind;
+      uniform float uLean;
+      attribute float aHeight;
+      attribute float aSeed;
       varying vec2 vUv;
-      varying float vNoise;
-      vec3 permute(vec3 value) {
-        return mod((value * 34.0 + 1.0) * value, 289.0);
+      varying float vTurbulence;
+      varying float vSeed;
+      float hash31(vec3 point) {
+        return fract(sin(dot(point, vec3(127.1, 311.7, 74.7))) * 43758.5453);
       }
-      float snoise(vec2 point) {
-        const vec4 constants = vec4(0.2113248654, 0.3660254038, -0.5773502692, 0.0243902439);
-        vec2 cell = floor(point + dot(point, constants.yy));
-        vec2 local = point - cell + dot(cell, constants.xx);
-        vec2 corner = local.x > local.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-        vec4 offsets = local.xyxy + constants.xxzz;
-        offsets.xy -= corner;
-        cell = mod(cell, 289.0);
-        vec3 hash = permute(permute(cell.y + vec3(0.0, corner.y, 1.0)) + cell.x + vec3(0.0, corner.x, 1.0));
-        vec3 weight = max(0.5 - vec3(dot(local, local), dot(offsets.xy, offsets.xy), dot(offsets.zw, offsets.zw)), 0.0);
-        weight *= weight;
-        weight *= weight;
-        vec3 gradientX = 2.0 * fract(hash * constants.www) - 1.0;
-        vec3 gradientH = abs(gradientX) - 0.5;
-        vec3 gradientOffset = floor(gradientX + 0.5);
-        vec3 gradientA = gradientX - gradientOffset;
-        weight *= 1.7928429 - 0.8537347 * (gradientA * gradientA + gradientH * gradientH);
-        vec3 gradient;
-        gradient.x = gradientA.x * local.x + gradientH.x * local.y;
-        gradient.y = gradientA.y * offsets.x + gradientH.y * offsets.y;
-        gradient.z = gradientA.z * offsets.z + gradientH.z * offsets.w;
-        return 130.0 * dot(weight, gradient);
+      vec3 gradientAt(vec3 lattice) {
+        return normalize(vec3(
+          hash31(lattice + vec3(17.1, 59.4, 15.2)),
+          hash31(lattice + vec3(83.2, 13.7, 71.9)),
+          hash31(lattice + vec3(41.7, 97.3, 11.5))
+        ) * 2.0 - 1.0);
+      }
+      float perlin3d(vec3 point) {
+        vec3 lattice = floor(point);
+        vec3 local = fract(point);
+        vec3 fade = local * local * local * (local * (local * 6.0 - 15.0) + 10.0);
+        float n000 = dot(gradientAt(lattice), local);
+        float n100 = dot(gradientAt(lattice + vec3(1.0, 0.0, 0.0)), local - vec3(1.0, 0.0, 0.0));
+        float n010 = dot(gradientAt(lattice + vec3(0.0, 1.0, 0.0)), local - vec3(0.0, 1.0, 0.0));
+        float n110 = dot(gradientAt(lattice + vec3(1.0, 1.0, 0.0)), local - vec3(1.0, 1.0, 0.0));
+        float n001 = dot(gradientAt(lattice + vec3(0.0, 0.0, 1.0)), local - vec3(0.0, 0.0, 1.0));
+        float n101 = dot(gradientAt(lattice + vec3(1.0, 0.0, 1.0)), local - vec3(1.0, 0.0, 1.0));
+        float n011 = dot(gradientAt(lattice + vec3(0.0, 1.0, 1.0)), local - vec3(0.0, 1.0, 1.0));
+        float n111 = dot(gradientAt(lattice + vec3(1.0, 1.0, 1.0)), local - vec3(1.0, 1.0, 1.0));
+        float x00 = mix(n000, n100, fade.x);
+        float x10 = mix(n010, n110, fade.x);
+        float x01 = mix(n001, n101, fade.x);
+        float x11 = mix(n011, n111, fade.x);
+        return 2.0 * mix(mix(x00, x10, fade.y), mix(x01, x11, fade.y), fade.z);
       }
       void main() {
         vUv = uv;
-        vec3 transformed = position;
-        float broadNoise = snoise(vec2(uv.x * 3.2 + uTime * 0.16, uv.y * 2.6 - uTime * 1.35));
-        float fineNoise = snoise(vec2(uv.x * 8.0 - uTime * 0.28, uv.y * 6.0 - uTime * 2.4));
-        float sway = sin(uv.y * 9.0 - uTime * 3.2 + broadNoise * 3.0) * 0.035;
-        transformed.x += uv.y * uv.y * (broadNoise * 0.12 + sway);
-        transformed.y += fineNoise * 0.035;
-        transformed.z += broadNoise * 0.045;
-        vNoise = fineNoise * 0.5 + 0.5;
-        gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(transformed, 1.0);
+        vSeed = aSeed;
+        vec3 displaced = position;
+        vec3 noisePosition = vec3(position.x * 0.24 + aSeed * 13.0, uv.y * 3.2 - uTime * 1.65, position.z * 0.24 + aSeed * 7.0);
+        float broadNoise = perlin3d(noisePosition);
+        float fineNoise = perlin3d(noisePosition * 2.1 + vec3(4.7, 0.0, 9.2));
+        float rise = uv.y;
+        float topLean = rise * rise * aHeight * uLean;
+        float sway = sin(uTime * 2.6 + aSeed * 31.0 + rise * 8.0) * 0.035;
+        displaced.x += uWind.x * topLean + (broadNoise * 0.16 + sway) * rise;
+        displaced.z += uWind.y * topLean + fineNoise * 0.12 * rise;
+        displaced.y += (broadNoise * 0.18 + fineNoise * 0.08 + sway) * rise;
+        vTurbulence = broadNoise * 0.65 + fineNoise * 0.35;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
       }
     `,
     fragmentShader: `
       uniform float uTime;
-      uniform float uOpacity;
-      uniform vec3 uColorA;
-      uniform vec3 uColorB;
+      uniform float uIntensity;
       varying vec2 vUv;
-      varying float vNoise;
-      vec3 permute(vec3 value) {
-        return mod((value * 34.0 + 1.0) * value, 289.0);
-      }
-      float snoise(vec2 point) {
-        const vec4 constants = vec4(0.2113248654, 0.3660254038, -0.5773502692, 0.0243902439);
-        vec2 cell = floor(point + dot(point, constants.yy));
-        vec2 local = point - cell + dot(cell, constants.xx);
-        vec2 corner = local.x > local.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-        vec4 offsets = local.xyxy + constants.xxzz;
-        offsets.xy -= corner;
-        cell = mod(cell, 289.0);
-        vec3 hash = permute(permute(cell.y + vec3(0.0, corner.y, 1.0)) + cell.x + vec3(0.0, corner.x, 1.0));
-        vec3 weight = max(0.5 - vec3(dot(local, local), dot(offsets.xy, offsets.xy), dot(offsets.zw, offsets.zw)), 0.0);
-        weight *= weight;
-        weight *= weight;
-        vec3 gradientX = 2.0 * fract(hash * constants.www) - 1.0;
-        vec3 gradientH = abs(gradientX) - 0.5;
-        vec3 gradientOffset = floor(gradientX + 0.5);
-        vec3 gradientA = gradientX - gradientOffset;
-        weight *= 1.7928429 - 0.8537347 * (gradientA * gradientA + gradientH * gradientH);
-        vec3 gradient;
-        gradient.x = gradientA.x * local.x + gradientH.x * local.y;
-        gradient.y = gradientA.y * offsets.x + gradientH.y * offsets.y;
-        gradient.z = gradientA.z * offsets.z + gradientH.z * offsets.w;
-        return 130.0 * dot(weight, gradient);
-      }
+      varying float vTurbulence;
+      varying float vSeed;
       void main() {
-        float turbulence = snoise(vec2(vUv.x * 5.0 + uTime * 0.18, vUv.y * 7.5 - uTime * 1.7));
-        float scroll = 0.5 + 0.5 * snoise(vec2(vUv.x * 7.0, vUv.y * 10.0 - uTime * 2.1));
-        float horizontal = abs(vUv.x - 0.5) * 2.0;
-        float flameWidth = mix(0.48, 0.025, vUv.y) + turbulence * 0.045;
-        float silhouette = 1.0 - smoothstep(flameWidth - 0.025, flameWidth + 0.045, horizontal);
-        float baseFade = smoothstep(0.0, 0.09, vUv.y);
-        float flicker = 0.76 + 0.24 * sin(vUv.y * 22.0 + uTime * 11.0 + turbulence * 3.0);
-        float alpha = silhouette * baseFade * flicker * (0.82 + scroll * 0.18) * uOpacity;
-        vec3 color = mix(uColorA, uColorB, clamp(vUv.y * 0.82 + scroll * 0.16, 0.0, 1.0));
-        gl_FragColor = vec4(color, alpha);
+        float rise = vUv.y;
+        float core = 1.0 - smoothstep(0.08, 0.72, rise);
+        float turbulence = clamp(0.5 + vTurbulence * 0.6, 0.0, 1.0);
+        float lick = 0.82 + 0.18 * sin(uTime * 12.0 + vSeed * 29.0 + rise * 20.0 + vTurbulence * 4.0);
+        float body = smoothstep(0.0, 0.055, rise) * (1.0 - smoothstep(0.93, 1.0, rise) * 0.22);
+        vec3 color = mix(vec3(1.0, 0.13, 0.012), vec3(1.0, 0.52, 0.11), core);
+        color = mix(color, vec3(1.0, 0.9, 0.58), core * core * 0.72);
+        gl_FragColor = vec4(color * uIntensity, body * (0.72 + turbulence * 0.28) * lick);
       }
     `,
   });
-  const innerFlameMaterial = flameMaterial.clone();
-  innerFlameMaterial.uniforms.uColorA.value = new THREE.Color('#ffe3a0');
-  innerFlameMaterial.uniforms.uColorB.value = new THREE.Color('#ff7c1d');
-  innerFlameMaterial.uniforms.uOpacity.value = 0.8;
-  const outerFlames = new THREE.InstancedMesh(flameRibbonGeometry, flameMaterial, CELL_COUNT * 3);
-  const innerFlames = new THREE.InstancedMesh(flameRibbonGeometry, innerFlameMaterial, CELL_COUNT * 3);
-  outerFlames.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  innerFlames.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  outerFlames.frustumCulled = false;
-  innerFlames.frustumCulled = false;
+  const flameFront = new THREE.Mesh(flameGeometry, flameMaterial);
+  flameFront.frustumCulled = false;
+  flameFront.renderOrder = 1;
+  scene.add(flameFront);
+  const plane = new THREE.PlaneGeometry(1, 1);
   const dummy = new THREE.Object3D();
   const pyroColor = new THREE.Color();
-  dummy.scale.set(0, 0, 0);
-  dummy.updateMatrix();
-  for (let i = 0; i < CELL_COUNT * 3; i++) {
-    outerFlames.setMatrixAt(i, dummy.matrix);
-    innerFlames.setMatrixAt(i, dummy.matrix);
-  }
-  scene.add(outerFlames, innerFlames);
-  const frontByRow = new Int32Array(GRID_SIZE);
-  const flareSlot = (index: number, ribbon: number) => index * 3 + ribbon;
-  const setFlameMatrix = (
-    mesh: any,
-    index: number,
-    x: number,
-    z: number,
-    ground: number,
-    width: number,
-    height: number,
-    rotation: number,
-    camera?: any,
-    ribbon: number = 0,
-  ) => {
-    const slot = flareSlot(index, ribbon);
-    dummy.position.set(x, ground + height * 0.52, z);
-    dummy.scale.set(width, height, 1);
-    dummy.rotation.set(0, rotation + ribbon * 0.9, (ribbon - 1) * 0.22);
-    if (camera) {
-      dummy.quaternion.copy(camera.quaternion);
-      dummy.rotateY(rotation + ribbon * 0.9);
-      dummy.rotateZ((ribbon - 1) * 0.22);
-    }
-    dummy.updateMatrix();
-    mesh.setMatrixAt(slot, dummy.matrix);
-  };
+  let fireFrontLength = 0;
+  let ribbonRefreshClock = 0;
 
   const burnLifeFactor = (index: number) => {
     const progress = age[index] / Math.max(1, burnDuration[index]);
     return progress <= 0.68 ? 1 : Math.max(0.24, 1 - ((progress - 0.68) / 0.32) * 0.76);
+  };
+
+  const rebuildFireFront = () => {
+    ribbonHeightSums.fill(0);
+    ribbonHeightCounts.fill(0);
+    let edgeCount = 0;
+    const addEdge = (start: number, end: number, index: number) => {
+      ribbonEdgeStarts[edgeCount] = start;
+      ribbonEdgeEnds[edgeCount] = end;
+      edgeCount++;
+      const height = Math.max(0.7, flameHeight[index] * burnLifeFactor(index));
+      ribbonHeightSums[start] += height;
+      ribbonHeightSums[end] += height;
+      ribbonHeightCounts[start]++;
+      ribbonHeightCounts[end]++;
+    };
+
+    for (const index of activeCells) {
+      const column = columnOf(index);
+      const row = rowOf(index);
+      const topLeft = row * (GRID_SIZE + 1) + column;
+      const topRight = topLeft + 1;
+      const bottomLeft = topLeft + GRID_SIZE + 1;
+      const bottomRight = bottomLeft + 1;
+      if (row === 0 || states[index - GRID_SIZE] !== BURNING) addEdge(topLeft, topRight, index);
+      if (column === GRID_SIZE - 1 || states[index + 1] !== BURNING) addEdge(topRight, bottomRight, index);
+      if (row === GRID_SIZE - 1 || states[index + GRID_SIZE] !== BURNING) addEdge(bottomRight, bottomLeft, index);
+      if (column === 0 || states[index - 1] !== BURNING) addEdge(bottomLeft, topLeft, index);
+    }
+
+    fireFrontLength = edgeCount * CELL_SIZE;
+    for (let node = 0; node < RIBBON_NODE_COUNT; node++) {
+      const count = ribbonHeightCounts[node];
+      if (!count) continue;
+      const column = node % (GRID_SIZE + 1);
+      const row = Math.floor(node / (GRID_SIZE + 1));
+      const x = GRID_ORIGIN + column * CELL_SIZE;
+      const z = GRID_ORIGIN + row * CELL_SIZE;
+      const ground = terrainHeight(x, z);
+      const height = ribbonHeightSums[node] / count;
+      const seedValue = Math.sin(node * 127.1 + 311.7) * 43758.5453;
+      const seed = seedValue - Math.floor(seedValue);
+      for (let step = 0; step <= RIBBON_VERTICAL_STEPS; step++) {
+        const vertex = node * RIBBON_VERTICES_PER_NODE + step;
+        const vertical = step / RIBBON_VERTICAL_STEPS;
+        const positionOffset = vertex * 3;
+        const uvOffset = vertex * 2;
+        ribbonPositions[positionOffset] = x;
+        ribbonPositions[positionOffset + 1] = ground + height * vertical;
+        ribbonPositions[positionOffset + 2] = z;
+        ribbonUvs[uvOffset] = (x + z) * 0.12;
+        ribbonUvs[uvOffset + 1] = vertical;
+        ribbonHeights[vertex] = height;
+        ribbonSeeds[vertex] = seed;
+      }
+    }
+
+    const requiredIndices = edgeCount * RIBBON_VERTICAL_STEPS * 6;
+    if (requiredIndices > ribbonIndices.length) {
+      const capacity = Math.max(requiredIndices, ribbonIndices.length * 2);
+      ribbonIndices = new Uint32Array(capacity);
+      ribbonIndexAttribute = new THREE.BufferAttribute(ribbonIndices, 1).setUsage(THREE.DynamicDrawUsage);
+      flameGeometry.setIndex(ribbonIndexAttribute);
+    }
+    let indexOffset = 0;
+    for (let edge = 0; edge < edgeCount; edge++) {
+      const start = ribbonEdgeStarts[edge] * RIBBON_VERTICES_PER_NODE;
+      const end = ribbonEdgeEnds[edge] * RIBBON_VERTICES_PER_NODE;
+      for (let step = 0; step < RIBBON_VERTICAL_STEPS; step++) {
+        const lowerStart = start + step;
+        const lowerEnd = end + step;
+        const upperStart = lowerStart + 1;
+        const upperEnd = lowerEnd + 1;
+        ribbonIndices[indexOffset++] = lowerStart;
+        ribbonIndices[indexOffset++] = lowerEnd;
+        ribbonIndices[indexOffset++] = upperEnd;
+        ribbonIndices[indexOffset++] = lowerStart;
+        ribbonIndices[indexOffset++] = upperEnd;
+        ribbonIndices[indexOffset++] = upperStart;
+      }
+    }
+
+    flameGeometry.setDrawRange(0, indexOffset);
+    flameGeometry.attributes.position.needsUpdate = true;
+    flameGeometry.attributes.uv.needsUpdate = true;
+    flameGeometry.attributes.aHeight.needsUpdate = true;
+    flameGeometry.attributes.aSeed.needsUpdate = true;
+    ribbonIndexAttribute.needsUpdate = true;
   };
 
   // Firebreak circles are instanced into one mesh and added only when dug.
@@ -523,20 +574,6 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     glowY: 8,
     glowZ: 0,
     glowStrength: 0,
-  };
-
-  const hideFlame = (index: number) => {
-    dummy.position.set(0, -1000, 0);
-    dummy.quaternion.identity();
-    dummy.rotation.set(0, 0, 0);
-    dummy.scale.set(0, 0, 0);
-    dummy.updateMatrix();
-    for (let ribbon = 0; ribbon < 3; ribbon++) {
-      outerFlames.setMatrixAt(flareSlot(index, ribbon), dummy.matrix);
-      innerFlames.setMatrixAt(flareSlot(index, ribbon), dummy.matrix);
-    }
-    outerFlames.instanceMatrix.needsUpdate = true;
-    innerFlames.instanceMatrix.needsUpdate = true;
   };
 
   const hideSprite = (mesh: any, index: number) => {
@@ -984,15 +1021,6 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     burnSlot[index] = slot;
     burningCount++;
     if (crown) crownCount++;
-    const x = cellX(index);
-    const z = cellZ(index);
-    const flameWidth = type === GRASS ? CELL_SIZE * 1.42 : CELL_SIZE * 1.22;
-    const coreWidth = type === GRASS ? CELL_SIZE * 0.98 : CELL_SIZE * 0.68;
-    for (let ribbon = 0; ribbon < 3; ribbon++) {
-      const angle = (ribbon - 1) * 0.8 + (type === TREE ? 0.14 : 0);
-      setFlameMatrix(outerFlames, index, x, z, cellGround[index], flameWidth * (0.72 + ribbon * 0.18), flameHeight[index] * (0.8 + ribbon * 0.12), angle, undefined, ribbon);
-      setFlameMatrix(innerFlames, index, x, z, cellGround[index], coreWidth * (0.72 + ribbon * 0.12), flameHeight[index] * 0.58 * (0.8 + ribbon * 0.12), angle * 0.85, undefined, ribbon);
-    }
     emitForCell(index, true);
     statsDirty = true;
     return true;
@@ -1062,7 +1090,6 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     if (crownMask[index]) crownCount = Math.max(0, crownCount - 1);
     crownMask[index] = 0;
     removeActiveCell(index);
-    hideFlame(index);
     options.onCellBurned?.(index);
     statsDirty = true;
   };
@@ -1091,7 +1118,6 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       burningCount = Math.max(0, burningCount - 1);
       if (crownMask[index]) crownCount = Math.max(0, crownCount - 1);
       removeActiveCell(index);
-      hideFlame(index);
     }
     states[index] = FIREBREAK;
     fuels[index] = NO_FUEL;
@@ -1384,15 +1410,10 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     }
 
     // Only burning cells are visited; the full grid is never scanned per frame.
-    frontByRow.fill(-1);
     let nearestDist = 1e9;
     let nearestIndex = -1;
     let frontX = GRID_ORIGIN;
     for (const index of activeCells) {
-      const row = rowOf(index);
-      if (columnOf(index) > (frontByRow[row] < 0 ? -1 : columnOf(frontByRow[row]))) {
-        frontByRow[row] = index;
-      }
       const x = cellX(index);
       if (x > frontX) frontX = x;
       const dist = Math.hypot(x - camera.position.x, cellZ(index) - camera.position.z);
@@ -1413,34 +1434,22 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       atmosphere.glowX = cellX(nearestIndex);
       atmosphere.glowY = cellGround[nearestIndex] + Math.max(3, flameHeight[nearestIndex] * 0.45);
       atmosphere.glowZ = cellZ(nearestIndex);
-      atmosphere.glowStrength = (0.8 + heat * 4.8) * (crownMask[nearestIndex] ? 1.35 : 1);
+      const frontGlow = THREE.MathUtils.clamp(fireFrontLength / 500, 0, 1);
+      atmosphere.glowStrength = (0.8 + heat * 4.8) * (crownMask[nearestIndex] ? 1.35 : 1) * (0.62 + frontGlow * 0.72);
     } else {
       atmosphere.glowStrength *= 0.85;
     }
 
-    const flameBoost = 1 + THREE.MathUtils.clamp(1 - nearestDist / 22, 0, 1) * 0.55;
-    for (const index of activeCells) {
-      const x = cellX(index);
-      const z = cellZ(index);
-      const ground = cellGround[index];
-      const phase = elapsed * (crownMask[index] ? 9.5 : 7.1) + index * 0.73;
-      const flicker = 0.88 + Math.sin(phase) * 0.075 + Math.sin(phase * 2.31) * 0.035;
-      const close = Math.hypot(x - camera.position.x, z - camera.position.z) < 26 ? flameBoost : 1;
-      const height = flameHeight[index] * flicker * burnLifeFactor(index) * close;
-      const grass = fuels[index] === GRASS;
-      const width = CELL_SIZE * (grass ? 1.42 : 1.22);
-      const coreWidth = CELL_SIZE * (grass ? 0.98 : 0.68);
-      const blendBoost = Math.max(0, (countDenseNeighbors(index) - 2) * 0.12);
-      for (let ribbon = 0; ribbon < 3; ribbon++) {
-        const angle = Math.sin(phase * 0.7 + ribbon) * 0.9 + ribbon * 0.8;
-        setFlameMatrix(outerFlames, index, x, z, ground, width * (0.78 + ribbon * 0.18 + blendBoost), height * (0.9 + ribbon * 0.14), angle, camera, ribbon);
-        setFlameMatrix(innerFlames, index, x, z, ground + height * 0.015, coreWidth * (0.84 + ribbon * 0.09), height * 0.52 * (0.9 + ribbon * 0.12), angle * 0.8 - 0.16, camera, ribbon);
-      }
+    ribbonRefreshClock += dt;
+    if (ribbonRefreshClock >= 0.12) {
+      rebuildFireFront();
+      ribbonRefreshClock = 0;
     }
-    outerFlames.instanceMatrix.needsUpdate = true;
-    innerFlames.instanceMatrix.needsUpdate = true;
+    const wind = windVector();
     flameMaterial.uniforms.uTime.value = elapsed;
-    innerFlameMaterial.uniforms.uTime.value = elapsed;
+    flameMaterial.uniforms.uWind.value.set(wind.x, wind.z);
+    flameMaterial.uniforms.uLean.value = 0.06 + (windSpeed / 35) * 0.24;
+    flameMaterial.uniforms.uIntensity.value = 0.85 + THREE.MathUtils.clamp(fireFrontLength / 500, 0, 1) * 0.45;
 
     updatePyrocumulus(elapsed, camera);
     updateSmogWall(elapsed, camera, smog, frontX);
@@ -1466,6 +1475,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   for (let row = 0; row < GRID_SIZE; row++) {
     ignite(row * GRID_SIZE);
   }
+  rebuildFireFront();
   options.onStats?.(getStats());
 
   const setWind = (directionDegrees: number, speedMph: number) => {
@@ -1482,9 +1492,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     getStats,
     dispose: () => {
       plane.dispose();
-      flameTexture.dispose();
+      flameGeometry.dispose();
       flameMaterial.dispose();
-      innerFlameMaterial.dispose();
       dirtGeometry.dispose();
       dirtMaterial.dispose();
       smokeTexture.dispose();
@@ -1516,41 +1525,6 @@ function makeParticleGeometry(THREE: any, positions: Float32Array, colors: Float
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
   geometry.setDrawRange(0, 0);
   return geometry;
-}
-
-function createFlameTexture(THREE: any) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 192;
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('Could not create the fire texture.');
-  const glow = context.createRadialGradient(64, 140, 8, 64, 132, 90);
-  glow.addColorStop(0, 'rgba(255,244,180,0.95)');
-  glow.addColorStop(0.25, 'rgba(255,169,49,0.95)');
-  glow.addColorStop(0.62, 'rgba(255,67,14,0.75)');
-  glow.addColorStop(1, 'rgba(125,20,4,0)');
-  context.fillStyle = glow;
-  context.beginPath();
-  context.moveTo(64, 190);
-  context.bezierCurveTo(19, 172, 35, 133, 42, 111);
-  context.bezierCurveTo(24, 82, 57, 56, 62, 8);
-  context.bezierCurveTo(83, 46, 92, 63, 82, 94);
-  context.bezierCurveTo(109, 77, 109, 126, 108, 144);
-  context.bezierCurveTo(109, 169, 89, 184, 64, 190);
-  context.fill();
-  const core = context.createLinearGradient(0, 190, 0, 93);
-  core.addColorStop(0, 'rgba(255,255,212,0.88)');
-  core.addColorStop(0.55, 'rgba(255,224,101,0.55)');
-  core.addColorStop(1, 'rgba(255,170,40,0)');
-  context.fillStyle = core;
-  context.beginPath();
-  context.moveTo(65, 187);
-  context.bezierCurveTo(49, 167, 56, 145, 61, 125);
-  context.bezierCurveTo(77, 146, 84, 161, 74, 185);
-  context.fill();
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
 }
 
 function createParticleTexture(THREE: any, kind: 'smoke' | 'ember' | 'ash' | 'smog' | 'water') {
