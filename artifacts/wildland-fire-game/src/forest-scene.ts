@@ -6,7 +6,7 @@ import {
   getFireGridCellIndex,
   type FireSimulation,
 } from './fire-simulation';
-import type { ForestSceneCallbacks, ForestSceneHandle } from './game-types';
+import type { ForestSceneCallbacks, ForestSceneHandle, ToolSelection } from './game-types';
 
 type Collider = { x: number; z: number; radius: number; active?: boolean };
 type BushInstanceRecord = {
@@ -491,7 +491,19 @@ export async function mountForest(
   const keys = new Set<string>();
   let menuOpen = false;
   let trenching = false;
+  let waterSpraying = false;
+  let activeTool: ToolSelection = 'mcleod';
   let lockedCallback = (_locked: boolean) => {};
+  callbacks.onToolChange?.(activeTool);
+
+  const setActiveTool = (tool: ToolSelection) => {
+    activeTool = tool;
+    callbacks.onToolChange?.(tool);
+    if (tool === 'mcleod') {
+      waterSpraying = false;
+      canvas.classList.remove('is-trenching');
+    }
+  };
 
   const setMenuState = (open: boolean) => {
     menuOpen = open;
@@ -520,13 +532,27 @@ export async function mountForest(
       }
       return;
     }
+    if (key === '1') {
+      event.preventDefault();
+      setActiveTool('mcleod');
+      return;
+    }
+    if (key === '2') {
+      event.preventDefault();
+      setActiveTool('hose');
+      return;
+    }
     if (menuOpen) return;
     if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
       keys.add(key);
       if (key.startsWith('arrow')) event.preventDefault();
     }
   };
-  const onKeyUp = (event: KeyboardEvent) => keys.delete(event.key.toLowerCase());
+  const onKeyUp = (event: KeyboardEvent) => {
+    const key = event.key.toLowerCase();
+    if (key === '1' || key === '2') return;
+    keys.delete(key);
+  };
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   const onLock = () => {
@@ -550,17 +576,32 @@ export async function mountForest(
     const target = event.target as Element | null;
     if (target?.closest?.('.hud, .menu-backdrop, .lock-screen')) return;
     if (!controls.isLocked && target !== canvas) return;
+
+    if (activeTool === 'hose') {
+      waterSpraying = true;
+      return;
+    }
+
     trenching = true;
     canvas.classList.add('is-trenching');
     digAtPlayer();
   };
   const onPointerEnd = (event: PointerEvent) => {
-    if ((event.type !== 'pointercancel' && event.button !== 0) || !trenching) return;
+    if (event.type !== 'pointercancel' && event.button !== 0) return;
+    if (activeTool === 'hose') {
+      waterSpraying = false;
+      return;
+    }
+    if (!trenching) return;
     trenching = false;
     canvas.classList.remove('is-trenching');
     fireSystem.endTrench();
   };
   const onWindowBlur = () => {
+    if (activeTool === 'hose') {
+      waterSpraying = false;
+      return;
+    }
     if (!trenching) return;
     trenching = false;
     canvas.classList.remove('is-trenching');
@@ -621,8 +662,19 @@ export async function mountForest(
         pos.y = terrainHeight(pos.x, pos.z) + 1.68;
       }
     }
+    if (activeTool === 'hose' && waterSpraying && controls.isLocked) {
+      const direction = new THREE.Vector3();
+      camera.getWorldDirection(direction);
+      const origin = camera.position.clone();
+      origin.add(direction.clone().multiplyScalar(0.8));
+      origin.y -= 0.35;
+      fireSystem.sprayWater(origin, direction, dt);
+    }
     if (trenching) digAtPlayer();
-    if (trenching) {
+    if (activeTool === 'hose') {
+      mcleod.rotation.x = 0.02;
+      mcleod.rotation.z = -0.48;
+    } else if (trenching) {
       const stroke = Math.sin(now * 0.018);
       mcleod.rotation.x = 0.02 + stroke * 0.14;
       mcleod.rotation.z = -0.48 + Math.abs(stroke) * 0.12;
@@ -675,6 +727,8 @@ export async function mountForest(
     unlock: () => controls.unlock(),
     setWind: (directionDegrees, speedMph) => fireSystem.setWind(directionDegrees, speedMph),
     setMenuOpen: (open) => setMenuState(open),
+    setActiveTool: (tool: ToolSelection) => setActiveTool(tool),
+    getActiveTool: () => activeTool,
     dispose: () => {
       disposed = true;
       cancelAnimationFrame(frame);

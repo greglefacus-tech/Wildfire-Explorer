@@ -28,6 +28,18 @@ type FireStats = {
   firebreakCells: number;
 };
 
+type WaterParticle = {
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  age: number;
+  life: number;
+  size: number;
+};
+
 type FireSystemOptions = {
   THREE: any;
   scene: any;
@@ -57,6 +69,7 @@ export type FireSimulation = {
   update: (dt: number, elapsed: number, camera: any) => AtmosphereState;
   digAt: (x: number, z: number) => void;
   endTrench: () => void;
+  sprayWater: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }, dt: number) => void;
   getStats: () => FireStats;
   dispose: () => void;
 };
@@ -78,7 +91,10 @@ const PYRO_CAPACITY = PYRO_COLUMN_MAX * PYRO_PUFFS_PER_COLUMN;
 const SMOG_WALL_PUFFS = 40;
 const ASH_CAPACITY = 1200;
 const BLIZZARD_CAPACITY = 2200;
+const WATER_CAPACITY = 1400;
 const BASE_FOG_DENSITY = 0.016;
+const WATER_RANGE = 22;
+const MAX_WETNESS = 40;
 
 export function getFireGridCellIndex(x: number, z: number) {
   const column = Math.floor((x - GRID_ORIGIN) / CELL_SIZE);
@@ -112,6 +128,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const spreadClock = new Float32Array(CELL_COUNT);
   const emissionClock = new Float32Array(CELL_COUNT);
   const emberSpotCooldown = new Float32Array(CELL_COUNT);
+  const wetnessTimer = new Float32Array(CELL_COUNT);
+  const waterCooling = new Float32Array(CELL_COUNT);
   const burnSlot = new Int32Array(CELL_COUNT);
   burnSlot.fill(-1);
   // Sparse simulation list: only burning cells receive per-frame simulation work.
@@ -296,6 +314,23 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const emberPoints = new THREE.Points(emberGeometry, emberMaterial);
   emberPoints.frustumCulled = false;
   scene.add(emberPoints);
+  const waterTexture = createParticleTexture(THREE, 'water');
+  const waterPositions = new Float32Array(WATER_CAPACITY * 3);
+  const waterColors = new Float32Array(WATER_CAPACITY * 3);
+  const waterGeometry = makeParticleGeometry(THREE, waterPositions, waterColors);
+  const waterMaterial = new THREE.PointsMaterial({
+    map: waterTexture,
+    size: 0.18,
+    transparent: true,
+    opacity: 0.8,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true,
+    sizeAttenuation: true,
+  });
+  const waterPoints = new THREE.Points(waterGeometry, waterMaterial);
+  waterPoints.frustumCulled = false;
+  scene.add(waterPoints);
   const ashPositions = new Float32Array(ASH_CAPACITY * 3);
   const ashColors = new Float32Array(ASH_CAPACITY * 3);
   const ashGeometry = makeParticleGeometry(THREE, ashPositions, ashColors);
@@ -347,6 +382,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
 
   const emberParticles: Particle[] = [];
   let emberCursor = 0;
+  const waterParticles: WaterParticle[] = [];
+  let waterCursor = 0;
   const ashParticles: Particle[] = [];
   let ashCursor = 0;
   const blizzardParticles: Particle[] = [];
@@ -562,6 +599,46 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     }
   };
 
+  const updateWaterParticles = (dt: number) => {
+    const positions = waterPositions;
+    const colors = waterColors;
+    for (let i = waterParticles.length - 1; i >= 0; i--) {
+      const particle = waterParticles[i];
+      particle.age += dt;
+      particle.vy += -9.8 * dt;
+      particle.x += particle.vx * dt;
+      particle.y += particle.vy * dt;
+      particle.z += particle.vz * dt;
+      const offset = i * 3;
+      positions[offset] = particle.x;
+      positions[offset + 1] = particle.y;
+      positions[offset + 2] = particle.z;
+      const fade = 1 - particle.age / particle.life;
+      colors[offset] = 0.5 + fade * 0.45;
+      colors[offset + 1] = 0.78 + fade * 0.18;
+      colors[offset + 2] = 0.9 + fade * 0.08;
+      if (particle.age >= particle.life || particle.y <= terrainHeight(particle.x, particle.z) + 0.15) {
+        const impactIndex = getFireGridCellIndex(particle.x, particle.z);
+        if (impactIndex >= 0) {
+          wetnessTimer[impactIndex] = Math.min(MAX_WETNESS, wetnessTimer[impactIndex] + 3.2);
+          if (states[impactIndex] === BURNING) {
+            waterCooling[impactIndex] = Math.min(1.2, waterCooling[impactIndex] + 0.55);
+          }
+        }
+        waterParticles.splice(i, 1);
+        if (i < waterParticles.length) {
+          const nextIndex = i * 3;
+          positions[nextIndex] = waterParticles[i]?.x ?? 0;
+          positions[nextIndex + 1] = waterParticles[i]?.y ?? 0;
+          positions[nextIndex + 2] = waterParticles[i]?.z ?? 0;
+        }
+      }
+    }
+    waterGeometry.setDrawRange(0, waterParticles.length);
+    waterGeometry.attributes.position.needsUpdate = true;
+    waterGeometry.attributes.color.needsUpdate = true;
+  };
+
   const updateVisualParticles = (
     particles: Particle[],
     dt: number,
@@ -700,6 +777,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
 
   const ignite = (index: number, incomingSlope = 0) => {
     if (index < 0 || states[index] !== UNBURNED || fuels[index] === NO_FUEL) return false;
+    if (wetnessTimer[index] > 0.25) return false;
     const type = fuels[index];
     const dense = countDenseNeighbors(index) >= 3;
     const crown = windSpeed >= 22 && type >= BRUSH && dense;
@@ -758,6 +836,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const landingZ = sourceZ +
       (wind.z * distanceCells + perpendicularZ * crosswindCells) * CELL_SIZE;
     const targetIndex = getFireGridCellIndex(landingX, landingZ);
+    if (targetIndex >= 0 && wetnessTimer[targetIndex] > 0) return false;
     const onFuel = targetIndex >= 0 && states[targetIndex] === UNBURNED && fuels[targetIndex] !== NO_FUEL;
     // Most embers that land on fuel ignite it, but a meaningful minority fizzle out.
     const willIgnite = onFuel && random() < 0.65;
@@ -841,6 +920,14 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     statsDirty = true;
   };
 
+  const applyWaterToCell = (index: number, sprayPower: number, dt: number) => {
+    if (index < 0) return;
+    wetnessTimer[index] = Math.min(MAX_WETNESS, wetnessTimer[index] + dt * 18.0 * (0.55 + sprayPower));
+    if (states[index] === BURNING) {
+      waterCooling[index] = Math.min(1.35, waterCooling[index] + dt * (1.5 + sprayPower * 1.8));
+    }
+  };
+
   const digAt = (x: number, z: number) => {
     const gridEnd = GRID_ORIGIN + GRID_SIZE * CELL_SIZE;
     if (x < GRID_ORIGIN || x > gridEnd || z < GRID_ORIGIN || z > gridEnd) return;
@@ -864,6 +951,45 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       }
     }
     lastDig = { x, z };
+  };
+
+  const sprayWater = (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }, dt: number) => {
+    const dir = { x: direction.x, y: direction.y, z: direction.z };
+    const len = Math.hypot(dir.x, dir.y, dir.z) || 1;
+    dir.x /= len; dir.y /= len; dir.z /= len;
+    const speed = 26 + windSpeed * 0.4;
+    const stepCount = 18;
+    for (let i = 0; i < 11; i++) {
+      const travel = (i / stepCount) * WATER_RANGE;
+      const x = origin.x + dir.x * travel;
+      const y = origin.y + dir.y * travel - 0.35 * travel * 0.15;
+      const z = origin.z + dir.z * travel;
+      const cellIndex = getFireGridCellIndex(x, z);
+      if (cellIndex >= 0) applyWaterToCell(cellIndex, 1.0, dt);
+      const sampleGround = terrainHeight(x, z);
+      if (y <= sampleGround + 0.2) {
+        const groundIndex = getFireGridCellIndex(x, z);
+        if (groundIndex >= 0) applyWaterToCell(groundIndex, 1.2, dt);
+      }
+      const particle: WaterParticle = {
+        x,
+        y: Math.max(y, sampleGround + 0.2),
+        z,
+        vx: dir.x * speed + (random() - 0.5) * 2.6,
+        vy: dir.y * speed + (random() - 0.5) * 1.3,
+        vz: dir.z * speed + (random() - 0.5) * 2.6,
+        age: 0,
+        life: 0.65 + random() * 0.35,
+        size: 0.12 + random() * 0.08,
+      };
+      waterCursor = waterParticles.length < WATER_CAPACITY ? waterParticles.length : waterCursor % WATER_CAPACITY;
+      if (waterParticles.length < WATER_CAPACITY) {
+        waterParticles.push(particle);
+      } else {
+        waterParticles[waterCursor] = particle;
+        waterCursor = (waterCursor + 1) % WATER_CAPACITY;
+      }
+    }
   };
 
   const updateParticleList = (
@@ -1000,6 +1126,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       const nextRow = row + dz;
       if (nextColumn < 0 || nextColumn >= GRID_SIZE || nextRow < 0 || nextRow >= GRID_SIZE) continue;
       const next = nextRow * GRID_SIZE + nextColumn;
+      if (wetnessTimer[next] > 0) continue;
       const targetFuel = fuels[next];
       if (states[next] !== UNBURNED || targetFuel === NO_FUEL) continue;
       const length = Math.hypot(dx, dz);
@@ -1026,9 +1153,19 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   };
 
   const update = (dt: number, elapsed: number, camera: any) => {
+    for (let i = 0; i < CELL_COUNT; i++) {
+      if (wetnessTimer[i] > 0) wetnessTimer[i] = Math.max(0, wetnessTimer[i] - dt);
+      if (waterCooling[i] > 0) waterCooling[i] = Math.max(0, waterCooling[i] - dt * 0.72);
+    }
     const turnCount = activeCells.length;
     for (let slot = turnCount - 1; slot >= 0; slot--) {
       const index = activeCells[slot];
+      if (wetnessTimer[index] > 0) {
+        const damp = Math.min(1, wetnessTimer[index] / 15);
+        age[index] += dt * (4.5 + damp * 9.0 + waterCooling[index] * 6.0);
+        spreadClock[index] += dt * (0.8 + damp * 2.4);
+        emissionClock[index] += dt * (0.7 + damp * 3.0);
+      }
       age[index] += dt;
       spreadClock[index] -= dt;
       emissionClock[index] += dt;
@@ -1116,6 +1253,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     updateSmogWall(elapsed, camera, smog, frontX);
     spawnAmbientAsh(camera, ashParticles.length < 240 ? 48 : ashParticles.length < ASH_CAPACITY * 0.78 ? 16 : 2);
     spawnEmberBlizzard(camera, emberStorm, dt);
+    updateWaterParticles(dt);
     updateParticleList(emberParticles, dt, emberPositions, emberColors, (targetIndex) => {
       ignite(targetIndex);
     });
@@ -1146,6 +1284,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     update,
     digAt,
     endTrench: () => { lastDig = null; },
+    sprayWater,
     getStats,
     dispose: () => {
       plane.dispose();
@@ -1159,6 +1298,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       emberTexture.dispose();
       ashTexture.dispose();
       emberGeometry.dispose();
+      waterGeometry.dispose();
+      waterTexture.dispose();
+      waterMaterial.dispose();
       ashGeometry.dispose();
       blizzardGeometry.dispose();
       trailGeometry.dispose();
@@ -1215,7 +1357,7 @@ function createFlameTexture(THREE: any) {
   return texture;
 }
 
-function createParticleTexture(THREE: any, kind: 'smoke' | 'ember' | 'ash' | 'smog') {
+function createParticleTexture(THREE: any, kind: 'smoke' | 'ember' | 'ash' | 'smog' | 'water') {
   const canvas = document.createElement('canvas');
   canvas.width = 64;
   canvas.height = 64;
@@ -1234,6 +1376,10 @@ function createParticleTexture(THREE: any, kind: 'smoke' | 'ember' | 'ash' | 'sm
     gradient.addColorStop(0, 'rgba(210,198,176,0.9)');
     gradient.addColorStop(0.35, 'rgba(160,148,128,0.45)');
     gradient.addColorStop(1, 'rgba(90,80,68,0)');
+  } else if (kind === 'water') {
+    gradient.addColorStop(0, 'rgba(220,245,255,1)');
+    gradient.addColorStop(0.28, 'rgba(122,214,255,0.85)');
+    gradient.addColorStop(1, 'rgba(118,200,245,0)');
   } else {
     gradient.addColorStop(0, 'rgba(255,255,202,1)');
     gradient.addColorStop(0.28, 'rgba(255,179,59,0.95)');

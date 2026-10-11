@@ -2,6 +2,8 @@ export const INITIAL_WIND_DIRECTION = 90;
 export const INITIAL_WIND_SPEED = 15;
 export const MAX_WIND_SPEED = 35;
 
+export type ToolSelection = 'mcleod' | 'hose';
+
 export type FireStats = {
   burningCells: number;
   burnedCells: number;
@@ -13,6 +15,7 @@ export type ForestSceneCallbacks = {
   onLockChange?: (locked: boolean) => void;
   onMenuChange?: (open: boolean) => void;
   onFireStats?: (stats: FireStats) => void;
+  onToolChange?: (tool: ToolSelection) => void;
 };
 
 export type ForestSceneHandle = {
@@ -20,5 +23,7 @@ export type ForestSceneHandle = {
   unlock: () => void;
   setWind: (directionDegrees: number, speedMph: number) => void;
   setMenuOpen: (open: boolean) => void;
+  setActiveTool: (tool: ToolSelection) => void;
+  getActiveTool: () => ToolSelection;
   dispose: () => void;
 };

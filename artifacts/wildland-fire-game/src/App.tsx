@@ -6,6 +6,7 @@ import {
   MAX_WIND_SPEED,
   type FireStats,
   type ForestSceneHandle,
+  type ToolSelection,
 } from './game-types';
 
 const EMPTY_STATS: FireStats = {
@@ -31,6 +32,7 @@ export default function App() {
   const [windDirection, setWindDirection] = useState(INITIAL_WIND_DIRECTION);
   const [windSpeed, setWindSpeed] = useState(INITIAL_WIND_SPEED);
   const [stats, setStats] = useState<FireStats>(EMPTY_STATS);
+  const [activeTool, setActiveTool] = useState<ToolSelection>('mcleod');
 
   useEffect(() => {
     let cancelled = false;
@@ -41,6 +43,7 @@ export default function App() {
       onLockChange: setLocked,
       onMenuChange: setMenuOpen,
       onFireStats: setStats,
+      onToolChange: setActiveTool,
     })).then((scene) => {
       if (cancelled) {
         scene.dispose();
@@ -84,6 +87,7 @@ export default function App() {
   const breeze = windSpeed <= 11;
   const highWinds = windSpeed >= 25;
   const directionName = compassName(windDirection);
+  const activeToolLabel = activeTool === 'mcleod' ? '[1] McLeod Tool' : '[2] Fire Hose';
 
   return (
     <main className="game-shell" aria-label="Wildland fire patrol forest walk" data-testid="game-shell">
@@ -192,8 +196,11 @@ export default function App() {
         <div className="lower-left">
           <section className="controls-card" aria-label="Field controls" data-testid="panel-controls">
             <div className="controls-title">
-              <span><i className="live-dot" />McLeod equipped</span>
+              <span><i className="live-dot" />{activeToolLabel}</span>
               <span>Patrol controls</span>
+            </div>
+            <div className="tool-hud" aria-live="polite" data-testid="text-active-tool">
+              Active Tool: {activeToolLabel}
             </div>
             <div className="key-layout" aria-label="Use W A S D to move and mouse to look">
               <span className="key w">W</span>
@@ -203,8 +210,8 @@ export default function App() {
               <div className="mouse-hint"><strong>Mouse</strong>Look around</div>
             </div>
             <div className="controls-instruction">
-              <span><strong>WASD</strong> move · <strong>Mouse</strong> look · hold <strong>Left mouse</strong> to rake beneath your boots</span>
-              <span><strong>P</strong> toggle pointer lock · <strong>Esc / Tab</strong> options menu</span>
+              <span><strong>1</strong> McLeod · <strong>2</strong> Fire Hose · <strong>WASD</strong> move · <strong>Mouse</strong> look</span>
+              <span><strong>Left mouse</strong> to rake or spray · <strong>P</strong> lock toggle · <strong>Esc / Tab</strong> options menu</span>
             </div>
           </section>
           <div className="footer-note" data-testid="text-terrain-note">Fireline · west edge advancing east</div>
