@@ -218,7 +218,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const smokeTexture = createParticleTexture(THREE, 'smoke');
   const emberTexture = createParticleTexture(THREE, 'ember');
   const smokeCloudPuffCount = 24;
-  const emberCapacity = 1800;
+  const emberCapacity = 3000;
   const emberPositions = new Float32Array(emberCapacity * 3);
   const emberColors = new Float32Array(emberCapacity * 3);
   const emberGeometry = makeParticleGeometry(THREE, emberPositions, emberColors);
@@ -238,9 +238,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   scene.add(smokeCloud);
   const emberMaterial = new THREE.PointsMaterial({
     map: emberTexture,
-    size: 1.55,
+    size: 1.35,
     transparent: true,
-    opacity: 0.95,
+    opacity: 0.9,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     vertexColors: true,
@@ -249,6 +249,24 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const emberPoints = new THREE.Points(emberGeometry, emberMaterial);
   emberPoints.frustumCulled = false;
   scene.add(emberPoints);
+
+  // Ember trail streaks: one LineSegments draw call, 2 vertices per ember.
+  // Tail position is extrapolated backward from velocity so wind-blown
+  // embers naturally produce long directional streaks.
+  const trailPositions = new Float32Array(emberCapacity * 6);
+  const trailColors = new Float32Array(emberCapacity * 6);
+  const trailGeometry = makeParticleGeometry(THREE, trailPositions, trailColors);
+  const trailMaterial = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.82,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const trailLines = new THREE.LineSegments(trailGeometry, trailMaterial);
+  trailLines.frustumCulled = false;
+  scene.add(trailLines);
+
   const emberParticles: Particle[] = [];
   let emberCursor = 0;
 
@@ -341,17 +359,17 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const ground = cellGround[index];
     const wind = windVector();
     const strength = windSpeed / 35;
-    const emberCount = type === GRASS ? 0 : initial ? (type === TREE ? 3 : 2) : crownMask[index] ? 2 : 1;
+    const emberCount = type === GRASS ? (initial ? 1 : 0) : initial ? (type === TREE ? 5 : 3) : crownMask[index] ? 3 : type === TREE ? 2 : 1;
     for (let i = 0; i < emberCount; i++) {
       const p: Particle = {
         x: x + (random() - 0.5) * CELL_SIZE * 0.45,
         y: ground + 0.4 + random() * Math.max(0.3, flameHeight[index] * 0.22),
         z: z + (random() - 0.5) * CELL_SIZE * 0.45,
-        vx: wind.x * (0.2 + strength * 1.8) + (random() - 0.5) * 0.9,
-        vy: 0.7 + random() * 2.1 + (crownMask[index] ? 1.2 : 0),
-        vz: wind.z * (0.2 + strength * 1.8) + (random() - 0.5) * 0.9,
+        vx: wind.x * (0.3 + strength * 2.4) + (random() - 0.5) * 1.1,
+        vy: 0.8 + random() * 2.4 + (crownMask[index] ? 1.5 : 0),
+        vz: wind.z * (0.3 + strength * 2.4) + (random() - 0.5) * 1.1,
         age: 0,
-        life: 1.3 + random() * 2.6,
+        life: 1.6 + random() * 3.0,
       };
       emberCursor = addParticle(emberParticles, emberCapacity, emberCursor, p);
     }
@@ -553,39 +571,97 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       particle.age += dt;
       if (particle.age >= particle.life) {
         if (particle.spotTargetIndex !== undefined) landedSpotTargets.push(particle.spotTargetIndex);
-        particles[i] = particles[particles.length - 1];
+        const lastIdx = particles.length - 1;
+        if (lastIdx !== i) {
+          positions[i * 3] = positions[lastIdx * 3];
+          positions[i * 3 + 1] = positions[lastIdx * 3 + 1];
+          positions[i * 3 + 2] = positions[lastIdx * 3 + 2];
+          colors[i * 3] = colors[lastIdx * 3];
+          colors[i * 3 + 1] = colors[lastIdx * 3 + 1];
+          colors[i * 3 + 2] = colors[lastIdx * 3 + 2];
+          trailPositions[i * 6] = trailPositions[lastIdx * 6];
+          trailPositions[i * 6 + 1] = trailPositions[lastIdx * 6 + 1];
+          trailPositions[i * 6 + 2] = trailPositions[lastIdx * 6 + 2];
+          trailPositions[i * 6 + 3] = trailPositions[lastIdx * 6 + 3];
+          trailPositions[i * 6 + 4] = trailPositions[lastIdx * 6 + 4];
+          trailPositions[i * 6 + 5] = trailPositions[lastIdx * 6 + 5];
+          trailColors[i * 6] = trailColors[lastIdx * 6];
+          trailColors[i * 6 + 1] = trailColors[lastIdx * 6 + 1];
+          trailColors[i * 6 + 2] = trailColors[lastIdx * 6 + 2];
+          trailColors[i * 6 + 3] = trailColors[lastIdx * 6 + 3];
+          trailColors[i * 6 + 4] = trailColors[lastIdx * 6 + 4];
+          trailColors[i * 6 + 5] = trailColors[lastIdx * 6 + 5];
+        }
+        particles[i] = particles[lastIdx];
         particles.pop();
         continue;
       }
       const fade = 1 - particle.age / particle.life;
+      let evx: number, evy: number, evz: number;
       if (particle.spotTargetIndex !== undefined) {
         const progress = particle.age / particle.life;
+        const prevX = particle.x, prevY = particle.y, prevZ = particle.z;
         particle.x = particle.startX! + (particle.targetX! - particle.startX!) * progress;
         particle.y = particle.startY! + (particle.targetY! - particle.startY!) * progress +
           Math.sin(Math.PI * progress) * (particle.arcHeight ?? 0);
         particle.z = particle.startZ! + (particle.targetZ! - particle.startZ!) * progress;
+        evx = (particle.x - prevX) / dt;
+        evy = (particle.y - prevY) / dt;
+        evz = (particle.z - prevZ) / dt;
       } else {
-        particle.vx += wind.x * windStrength * 0.68 * dt;
-        particle.vz += wind.z * windStrength * 0.68 * dt;
-        particle.vx *= 0.986;
-        particle.vz *= 0.986;
+        const gust = (random() - 0.5) * 0.6 * windStrength;
+        particle.vx += (wind.x * windStrength * 1.35 + gust) * dt;
+        particle.vz += (wind.z * windStrength * 1.35 + gust) * dt;
+        particle.vy += (random() - 0.5) * 0.4 * windStrength * dt;
+        particle.vx *= 0.982;
+        particle.vz *= 0.982;
+        particle.vy *= 0.995;
         particle.x += particle.vx * dt;
         particle.y += particle.vy * dt;
         particle.z += particle.vz * dt;
+        evx = particle.vx;
+        evy = particle.vy;
+        evz = particle.vz;
       }
       const offset = i * 3;
       positions[offset] = particle.x;
       positions[offset + 1] = particle.y;
       positions[offset + 2] = particle.z;
-      colors[offset] = 1;
-      colors[offset + 1] = 0.22 + fade * 0.62;
-      colors[offset + 2] = 0.035 + fade * 0.12;
+      const r = 1;
+      const g = 0.22 + fade * 0.62;
+      const b = 0.035 + fade * 0.12;
+      colors[offset] = r;
+      colors[offset + 1] = g;
+      colors[offset + 2] = b;
+      const speed = Math.hypot(evx, evy, evz);
+      const trailLen = Math.min(speed * 0.16, 4.8);
+      const to = i * 6;
+      trailPositions[to] = particle.x;
+      trailPositions[to + 1] = particle.y;
+      trailPositions[to + 2] = particle.z;
+      trailColors[to] = r;
+      trailColors[to + 1] = g;
+      trailColors[to + 2] = b;
+      if (speed > 0.01) {
+        const inv = trailLen / speed;
+        trailPositions[to + 3] = particle.x - evx * inv;
+        trailPositions[to + 4] = particle.y - evy * inv;
+        trailPositions[to + 5] = particle.z - evz * inv;
+      } else {
+        trailPositions[to + 3] = particle.x;
+        trailPositions[to + 4] = particle.y;
+        trailPositions[to + 5] = particle.z;
+      }
+      trailColors[to + 3] = r * 0.1;
+      trailColors[to + 4] = g * 0.06;
+      trailColors[to + 5] = 0;
     }
     emberGeometry.setDrawRange(0, particles.length);
     emberGeometry.attributes.position.needsUpdate = true;
     emberGeometry.attributes.color.needsUpdate = true;
-    // Ignite only after iteration so new visual embers cannot mutate the list
-    // while expired particles are being removed.
+    trailGeometry.setDrawRange(0, particles.length * 2);
+    trailGeometry.attributes.position.needsUpdate = true;
+    trailGeometry.attributes.color.needsUpdate = true;
     for (const targetIndex of landedSpotTargets) onSpotLanded?.(targetIndex);
   };
 
@@ -637,7 +713,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       spreadClock[index] -= dt;
       emissionClock[index] += dt;
       emberSpotCooldown[index] = Math.max(0, emberSpotCooldown[index] - dt);
-      const emissionInterval = crownMask[index] ? 0.22 : fuels[index] === TREE ? 0.45 : fuels[index] === BRUSH ? 0.65 : 1.15;
+      const emissionInterval = crownMask[index] ? 0.18 : fuels[index] === TREE ? 0.38 : fuels[index] === BRUSH ? 0.55 : 1.0;
       if (emissionClock[index] > emissionInterval) {
         emissionClock[index] = 0;
         emitForCell(index);
@@ -725,6 +801,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       smokeTexture.dispose();
       emberTexture.dispose();
       emberGeometry.dispose();
+      trailGeometry.dispose();
+      trailMaterial.dispose();
       smokeMaterial.dispose();
       emberMaterial.dispose();
     },
