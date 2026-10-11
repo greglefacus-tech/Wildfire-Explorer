@@ -8,6 +8,14 @@ type Particle = {
   vz: number;
   age: number;
   life: number;
+  spotTargetIndex?: number;
+  startX?: number;
+  startY?: number;
+  startZ?: number;
+  targetX?: number;
+  targetY?: number;
+  targetZ?: number;
+  arcHeight?: number;
 };
 
 type FireStats = {
@@ -47,6 +55,7 @@ const CELL_SIZE = FIRE_GRID_CELL_SIZE;
 const GRID_ORIGIN = FIRE_GRID_ORIGIN;
 const CELL_COUNT = GRID_SIZE * GRID_SIZE;
 const SMOKE_CLOUD_ALTITUDE = 42;
+const SPOTTING_WIND_THRESHOLD_MPH = 18;
 
 export function getFireGridCellIndex(x: number, z: number) {
   const column = Math.floor((x - GRID_ORIGIN) / CELL_SIZE);
@@ -78,8 +87,10 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const flameHeight = new Float32Array(CELL_COUNT);
   const spreadClock = new Float32Array(CELL_COUNT);
   const emissionClock = new Float32Array(CELL_COUNT);
+  const emberSpotCooldown = new Float32Array(CELL_COUNT);
   const burnSlot = new Int32Array(CELL_COUNT);
   burnSlot.fill(-1);
+  // Sparse simulation list: only burning cells receive per-frame simulation work.
   const activeCells: number[] = [];
   let lastDig: { x: number; z: number } | null = null;
 
@@ -254,13 +265,6 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   };
 
   const updateSmokeCloud = (elapsed: number, camera: any) => {
-    frontByRow.fill(-1);
-    for (const index of activeCells) {
-      const row = rowOf(index);
-      if (columnOf(index) > (frontByRow[row] < 0 ? -1 : columnOf(frontByRow[row]))) {
-        frontByRow[row] = index;
-      }
-    }
     const wind = windVector();
     for (let puff = 0; puff < smokeCloudPuffCount; puff++) {
       const row = Math.round(puff * (GRID_SIZE - 1) / (smokeCloudPuffCount - 1));
@@ -369,7 +373,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     return count;
   };
 
-  const ignite = (index: number) => {
+  const ignite = (index: number, incomingSlope = 0) => {
     if (index < 0 || states[index] !== UNBURNED || fuels[index] === NO_FUEL) return false;
     const type = fuels[index];
     const dense = countDenseNeighbors(index) >= 3;
@@ -385,13 +389,16 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       : 30 + random() * 16;
     if (crown) duration *= 1.28;
     burnDuration[index] = duration;
-    flameHeight[index] = type === GRASS
+    const baseFlameHeight = type === GRASS
       ? 1.45 + windSpeed / 35 * 0.65
       : crown
         ? Math.max(12.5, nearbyTreeHeight * 1.5) + random() * 2.4
         : type === BRUSH
           ? 3.8 + windSpeed / 35 * 1.2
           : nearbyTreeHeight * 1.28 + windSpeed / 35 * 0.8;
+    // A fire that climbs into elevated fuel burns taller from radiant preheating.
+    const uphillFlameMultiplier = Math.min(2.5, 1 + Math.max(0, incomingSlope) * 1.5);
+    flameHeight[index] = baseFlameHeight * uphillFlameMultiplier;
     const slot = activeCells.length;
     activeCells.push(index);
     burnSlot[index] = slot;
@@ -409,6 +416,53 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     emitForCell(index, true);
     statsDirty = true;
     return true;
+  };
+
+  const spawnSpottingEmber = (sourceIndex: number) => {
+    const wind = windVector();
+    const perpendicularX = -wind.z;
+    const perpendicularZ = wind.x;
+    const sourceX = cellX(sourceIndex);
+    const sourceZ = cellZ(sourceIndex);
+    const sourceY = cellGround[sourceIndex] + Math.max(1, flameHeight[sourceIndex] * 0.78);
+
+    // Do not trace the flight path through the grid: an ember may cross a
+    // cleared firebreak and ignite fuel on the far side.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const distanceCells = 1 + Math.floor(random() * 4);
+      const crosswindCells = (random() - 0.5) * 0.8;
+      const landingX = sourceX +
+        (wind.x * distanceCells + perpendicularX * crosswindCells) * CELL_SIZE;
+      const landingZ = sourceZ +
+        (wind.z * distanceCells + perpendicularZ * crosswindCells) * CELL_SIZE;
+      const targetIndex = getFireGridCellIndex(landingX, landingZ);
+      if (targetIndex < 0 || states[targetIndex] !== UNBURNED || fuels[targetIndex] === NO_FUEL) continue;
+
+      const targetX = cellX(targetIndex);
+      const targetZ = cellZ(targetIndex);
+      const flightTime = 0.7 + distanceCells * 0.24;
+      const particle: Particle = {
+        x: sourceX,
+        y: sourceY,
+        z: sourceZ,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        age: 0,
+        life: flightTime,
+        spotTargetIndex: targetIndex,
+        startX: sourceX,
+        startY: sourceY,
+        startZ: sourceZ,
+        targetX,
+        targetY: cellGround[targetIndex] + 0.16,
+        targetZ,
+        arcHeight: 3 + distanceCells * 1.2,
+      };
+      emberCursor = addParticle(emberParticles, emberCapacity, emberCursor, particle);
+      return true;
+    }
+    return false;
   };
 
   const finishBurn = (index: number) => {
@@ -489,25 +543,36 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     dt: number,
     positions: Float32Array,
     colors: Float32Array,
+    onSpotLanded?: (targetIndex: number) => void,
   ) => {
     const wind = windVector();
     const windStrength = windSpeed / 35;
+    const landedSpotTargets: number[] = [];
     for (let i = particles.length - 1; i >= 0; i--) {
       const particle = particles[i];
       particle.age += dt;
       if (particle.age >= particle.life) {
+        if (particle.spotTargetIndex !== undefined) landedSpotTargets.push(particle.spotTargetIndex);
         particles[i] = particles[particles.length - 1];
         particles.pop();
         continue;
       }
       const fade = 1 - particle.age / particle.life;
-      particle.vx += wind.x * windStrength * 0.68 * dt;
-      particle.vz += wind.z * windStrength * 0.68 * dt;
-      particle.vx *= 0.986;
-      particle.vz *= 0.986;
-      particle.x += particle.vx * dt;
-      particle.y += particle.vy * dt;
-      particle.z += particle.vz * dt;
+      if (particle.spotTargetIndex !== undefined) {
+        const progress = particle.age / particle.life;
+        particle.x = particle.startX! + (particle.targetX! - particle.startX!) * progress;
+        particle.y = particle.startY! + (particle.targetY! - particle.startY!) * progress +
+          Math.sin(Math.PI * progress) * (particle.arcHeight ?? 0);
+        particle.z = particle.startZ! + (particle.targetZ! - particle.startZ!) * progress;
+      } else {
+        particle.vx += wind.x * windStrength * 0.68 * dt;
+        particle.vz += wind.z * windStrength * 0.68 * dt;
+        particle.vx *= 0.986;
+        particle.vz *= 0.986;
+        particle.x += particle.vx * dt;
+        particle.y += particle.vy * dt;
+        particle.z += particle.vz * dt;
+      }
       const offset = i * 3;
       positions[offset] = particle.x;
       positions[offset + 1] = particle.y;
@@ -519,6 +584,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     emberGeometry.setDrawRange(0, particles.length);
     emberGeometry.attributes.position.needsUpdate = true;
     emberGeometry.attributes.color.needsUpdate = true;
+    // Ignite only after iteration so new visual embers cannot mutate the list
+    // while expired particles are being removed.
+    for (const targetIndex of landedSpotTargets) onSpotLanded?.(targetIndex);
   };
 
   const attemptSpread = (sourceIndex: number) => {
@@ -530,6 +598,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     // along the front, while reverse spread and isolated spot fires are disabled.
     const directions = [[1, -1], [1, 0], [1, 1]];
     const sourceHeight = cellGround[sourceIndex];
+    let fastestSlopeMultiplier = 1;
     for (const [dx, dz] of directions) {
       const nextColumn = column + dx;
       const nextRow = row + dz;
@@ -543,8 +612,11 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         ? 1 + alignment * windStrength * 2.75
         : Math.max(0.08, 1 + alignment * windStrength * 0.9);
       const baseProbability = targetFuel === GRASS ? 0.04 : targetFuel === BRUSH ? 0.48 : 0.72;
-      const slope = (cellGround[next] - sourceHeight) / CELL_SIZE;
-      const slopeFactor = Math.max(0.65, Math.min(1.48, 1 + slope * 0.5));
+      const elevationDelta = cellGround[next] - sourceHeight;
+      const slopeFactor = elevationDelta > 0
+        ? 1 + Math.min(elevationDelta, 1.5) * 1.5
+        : elevationDelta < 0 ? 0.5 : 1;
+      fastestSlopeMultiplier = Math.max(fastestSlopeMultiplier, slopeFactor);
       const crownFactor = crownMask[sourceIndex] ? 1.65 : 1;
       const windFactor = 0.75 + windStrength * 1.25;
       const diagonalPenalty = length > 1 ? 0.76 : 1;
@@ -552,9 +624,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         0.92,
         baseProbability * directional * slopeFactor * crownFactor * windFactor * diagonalPenalty,
       );
-      if (random() < probability) ignite(next);
+      if (random() < probability) ignite(next, Math.max(0, elevationDelta));
     }
-
+    return fastestSlopeMultiplier;
   };
 
   const update = (dt: number, elapsed: number, camera: any) => {
@@ -564,20 +636,41 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       age[index] += dt;
       spreadClock[index] -= dt;
       emissionClock[index] += dt;
+      emberSpotCooldown[index] = Math.max(0, emberSpotCooldown[index] - dt);
       const emissionInterval = crownMask[index] ? 0.22 : fuels[index] === TREE ? 0.45 : fuels[index] === BRUSH ? 0.65 : 1.15;
       if (emissionClock[index] > emissionInterval) {
         emissionClock[index] = 0;
         emitForCell(index);
       }
-      if (spreadClock[index] <= 0) {
-        spreadClock[index] = 2.1 + random() * 1.2;
-        attemptSpread(index);
+      const highIntensity = crownMask[index] === 1 || fuels[index] === BRUSH || fuels[index] === TREE;
+      if (
+        windSpeed >= SPOTTING_WIND_THRESHOLD_MPH &&
+        highIntensity &&
+        burnLifeFactor(index) >= 0.96 &&
+        emberSpotCooldown[index] <= 0
+      ) {
+        emberSpotCooldown[index] = crownMask[index] ? 0.9 : 1.8;
+        const spawnChance = crownMask[index] ? 0.8 : fuels[index] === BRUSH ? 0.38 : 0.28;
+        if (random() < spawnChance) spawnSpottingEmber(index);
       }
-      if (age[index] >= burnDuration[index]) finishBurn(index);
+      if (spreadClock[index] <= 0) {
+        const slopeMultiplier = attemptSpread(index);
+        spreadClock[index] = (2.1 + random() * 1.2) / slopeMultiplier;
+      }
+      if (age[index] >= burnDuration[index]) {
+        finishBurn(index);
+        continue;
+      }
     }
 
-    // Billboard flames stay camera-facing; one instance per cell keeps draw calls low.
+    // Only burning cells are visited; the full grid is never scanned per frame.
+    // This pass also maintains the current fire front used by the smoke cloud.
+    frontByRow.fill(-1);
     for (const index of activeCells) {
+      const row = rowOf(index);
+      if (columnOf(index) > (frontByRow[row] < 0 ? -1 : columnOf(frontByRow[row]))) {
+        frontByRow[row] = index;
+      }
       const x = cellX(index);
       const z = cellZ(index);
       const ground = cellGround[index];
@@ -594,7 +687,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     innerFlames.instanceMatrix.needsUpdate = true;
 
     updateSmokeCloud(elapsed, camera);
-    updateParticleList(emberParticles, dt, emberPositions, emberColors);
+    updateParticleList(emberParticles, dt, emberPositions, emberColors, (targetIndex) => {
+      ignite(targetIndex);
+    });
 
     statsClock += dt;
     if (statsClock >= 0.55) {
