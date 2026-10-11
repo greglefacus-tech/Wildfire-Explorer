@@ -834,9 +834,31 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     return count;
   };
 
+  const getRadiantHeatAtCell = (index: number) => {
+    if (index < 0) return 0;
+    const x = cellX(index);
+    const z = cellZ(index);
+    let peak = 0;
+    for (const burning of activeCells) {
+      if (burning === index) continue;
+      const dist = Math.hypot(cellX(burning) - x, cellZ(burning) - z);
+      if (dist > 14) continue;
+      const fireMass = crownMask[burning] ? 1.6 : fuels[burning] === TREE ? 1.3 : fuels[burning] === BRUSH ? 1.1 : 0.7;
+      const proximity = 1 - dist / 14;
+      const heat = proximity * fireMass * (flameHeight[burning] / 12);
+      if (heat > peak) peak = heat;
+    }
+    return Math.min(1.2, peak);
+  };
+
   const ignite = (index: number, incomingSlope = 0) => {
     if (index < 0 || states[index] !== UNBURNED || fuels[index] === NO_FUEL) return false;
-    if (wetnessTimer[index] > 0.25) return false;
+    if (wetnessTimer[index] > 0) {
+      const wetGuard = Math.min(0.7, wetnessTimer[index] / MAX_WETNESS * 0.7);
+      const radiantHeat = getRadiantHeatAtCell(index);
+      const ignitionChance = Math.max(0.12, 1 - wetGuard - radiantHeat * 0.2);
+      if (random() > ignitionChance) return false;
+    }
     const type = fuels[index];
     const dense = countDenseNeighbors(index) >= 3;
     const crown = windSpeed >= 22 && type >= BRUSH && dense;
@@ -895,7 +917,12 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const landingZ = sourceZ +
       (wind.z * distanceCells + perpendicularZ * crosswindCells) * CELL_SIZE;
     const targetIndex = getFireGridCellIndex(landingX, landingZ);
-    if (targetIndex >= 0 && wetnessTimer[targetIndex] > 0) return false;
+    if (targetIndex >= 0 && wetnessTimer[targetIndex] > 0) {
+      const wetResistance = Math.min(0.7, wetnessTimer[targetIndex] / MAX_WETNESS * 0.7);
+      const windPressure = Math.max(0, (windSpeed - 18) / 20);
+      const emberChance = Math.max(0.12, 0.32 + (0.7 - wetResistance) * 0.55 + windPressure * 0.28 + getRadiantHeatAtCell(targetIndex) * 0.12);
+      if (random() > emberChance) return false;
+    }
     const onFuel = targetIndex >= 0 && states[targetIndex] === UNBURNED && fuels[targetIndex] !== NO_FUEL;
     // Most embers that land on fuel ignite it, but a meaningful minority fizzle out.
     const willIgnite = onFuel && random() < 0.65;
@@ -981,10 +1008,12 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
 
   const applyWaterToCell = (index: number, sprayPower: number, dt: number) => {
     if (index < 0) return;
-    const targetWetness = Math.min(MAX_WETNESS, wetnessTimer[index] + dt * 5.2 * (0.8 + sprayPower));
+    const radiantHeat = getRadiantHeatAtCell(index);
+    const heatPenalty = Math.max(0.2, 1 - radiantHeat * 0.75);
+    const targetWetness = Math.min(MAX_WETNESS, wetnessTimer[index] + dt * 5.2 * (0.6 + sprayPower) * heatPenalty);
     wetnessTimer[index] = targetWetness;
     if (states[index] === BURNING) {
-      waterCooling[index] = Math.min(0.9, waterCooling[index] + dt * (0.45 + sprayPower * 0.7));
+      waterCooling[index] = Math.min(0.9, waterCooling[index] + dt * (0.28 + sprayPower * 0.38) * heatPenalty);
     }
   };
 
@@ -1209,19 +1238,24 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
 
   const update = (dt: number, elapsed: number, camera: any) => {
     for (let i = 0; i < CELL_COUNT; i++) {
-      if (wetnessTimer[i] > 0) wetnessTimer[i] = Math.max(0, wetnessTimer[i] - dt);
+      if (wetnessTimer[i] > 0) {
+        const radiantHeat = getRadiantHeatAtCell(i);
+        const evaporativeLoss = 0.18 + radiantHeat * 0.9 + (windSpeed / 35) * 0.28;
+        wetnessTimer[i] = Math.max(0, wetnessTimer[i] - dt * evaporativeLoss);
+      }
       if (waterCooling[i] > 0) waterCooling[i] = Math.max(0, waterCooling[i] - dt * 0.72);
     }
     const turnCount = activeCells.length;
     for (let slot = turnCount - 1; slot >= 0; slot--) {
       const index = activeCells[slot];
       if (wetnessTimer[index] > 0) {
+        const radiantHeat = getRadiantHeatAtCell(index);
         const damp = Math.min(1, wetnessTimer[index] / MAX_WETNESS);
         const flameResistance = Math.min(1, flameHeight[index] / 11);
-        const suppression = Math.max(0, (1.2 + damp * 4.2) * (1 - flameResistance * 0.72));
+        const suppression = Math.max(0, (0.7 + damp * 2.2) * (1 - flameResistance * 0.52) * Math.max(0.18, 1 - radiantHeat * 0.72));
         age[index] -= dt * suppression;
-        spreadClock[index] += dt * (0.6 + damp * 2.8);
-        emissionClock[index] += dt * (0.7 + damp * 2.6);
+        spreadClock[index] += dt * (0.8 + damp * 2.1 + radiantHeat * 1.5);
+        emissionClock[index] += dt * (0.9 + damp * 2.0 + radiantHeat * 1.2);
       }
       age[index] += dt;
       spreadClock[index] -= dt;
