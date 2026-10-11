@@ -79,8 +79,15 @@ export async function mountForest(
   mcleod.position.set(0.43, -0.39, -0.88);
   mcleod.rotation.set(0.02, 0.08, -0.48);
   camera.add(mcleod);
+  const hose = new THREE.Group();
+  hose.position.set(0.48, -0.42, -0.96);
+  hose.rotation.set(0.32, 0.05, -0.7);
+  hose.visible = false;
+  camera.add(hose);
   const handleMaterial = new THREE.MeshStandardMaterial({ color: '#795632', roughness: 0.88 });
   const steelMaterial = new THREE.MeshStandardMaterial({ color: '#aeb9b5', metalness: 0.86, roughness: 0.38 });
+  const hoseMaterial = new THREE.MeshStandardMaterial({ color: '#2a2d32', roughness: 0.9, metalness: 0.5 });
+  const hoseTipMaterial = new THREE.MeshStandardMaterial({ color: '#c9d1d4', metalness: 0.9, roughness: 0.25 });
   const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.027, 0.9, 8), handleMaterial);
   handle.position.set(0, 0.28, 0);
   handle.rotation.z = -0.08;
@@ -94,6 +101,18 @@ export async function mountForest(
     tine.position.set(-0.19 + tooth * 0.05, 0.635, 0);
     mcleod.add(tine);
   }
+  const hoseTube = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 1.15, 12), hoseMaterial);
+  hoseTube.rotation.z = Math.PI / 2;
+  hoseTube.position.set(0.06, -0.02, -0.06);
+  hose.add(hoseTube);
+  const nozzleBody = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.04, 0.28, 10), hoseTipMaterial);
+  nozzleBody.rotation.z = Math.PI / 2;
+  nozzleBody.position.set(0.62, -0.02, -0.08);
+  hose.add(nozzleBody);
+  const nozzleTip = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.025, 0.08, 10), hoseTipMaterial);
+  nozzleTip.rotation.z = Math.PI / 2;
+  nozzleTip.position.set(0.8, -0.02, -0.08);
+  hose.add(nozzleTip);
 
   const hemi = new THREE.HemisphereLight(0xc24a18, 0x140804, 0.62);
   scene.add(hemi);
@@ -498,9 +517,11 @@ export async function mountForest(
 
   const setActiveTool = (tool: ToolSelection) => {
     activeTool = tool;
+    mcleod.visible = tool === 'mcleod';
+    hose.visible = tool === 'hose';
     callbacks.onToolChange?.(tool);
+    waterSpraying = false;
     if (tool === 'mcleod') {
-      waterSpraying = false;
       canvas.classList.remove('is-trenching');
     }
   };
@@ -666,14 +687,15 @@ export async function mountForest(
       const direction = new THREE.Vector3();
       camera.getWorldDirection(direction);
       const origin = camera.position.clone();
-      origin.add(direction.clone().multiplyScalar(0.8));
-      origin.y -= 0.35;
-      fireSystem.sprayWater(origin, direction, dt);
+      origin.add(direction.clone().multiplyScalar(1.5));
+      origin.y -= 0.22;
+      const hoseTip = new THREE.Vector3(0.8, -0.02, -0.08).applyQuaternion(camera.quaternion).add(camera.position);
+      fireSystem.sprayWater(hoseTip, direction, dt);
     }
     if (trenching) digAtPlayer();
     if (activeTool === 'hose') {
-      mcleod.rotation.x = 0.02;
-      mcleod.rotation.z = -0.48;
+      hose.rotation.x = 0.32 + Math.sin(now * 0.012) * 0.08;
+      hose.rotation.z = -0.7 + Math.sin(now * 0.018) * 0.06;
     } else if (trenching) {
       const stroke = Math.sin(now * 0.018);
       mcleod.rotation.x = 0.02 + stroke * 0.14;

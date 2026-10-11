@@ -94,7 +94,7 @@ const BLIZZARD_CAPACITY = 2200;
 const WATER_CAPACITY = 1400;
 const BASE_FOG_DENSITY = 0.016;
 const WATER_RANGE = 22;
-const MAX_WETNESS = 40;
+const MAX_WETNESS = 5;
 
 export function getFireGridCellIndex(x: number, z: number) {
   const column = Math.floor((x - GRID_ORIGIN) / CELL_SIZE);
@@ -922,9 +922,10 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
 
   const applyWaterToCell = (index: number, sprayPower: number, dt: number) => {
     if (index < 0) return;
-    wetnessTimer[index] = Math.min(MAX_WETNESS, wetnessTimer[index] + dt * 18.0 * (0.55 + sprayPower));
+    const targetWetness = Math.min(MAX_WETNESS, wetnessTimer[index] + dt * 5.2 * (0.8 + sprayPower));
+    wetnessTimer[index] = targetWetness;
     if (states[index] === BURNING) {
-      waterCooling[index] = Math.min(1.35, waterCooling[index] + dt * (1.5 + sprayPower * 1.8));
+      waterCooling[index] = Math.min(0.9, waterCooling[index] + dt * (0.45 + sprayPower * 0.7));
     }
   };
 
@@ -957,29 +958,25 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const dir = { x: direction.x, y: direction.y, z: direction.z };
     const len = Math.hypot(dir.x, dir.y, dir.z) || 1;
     dir.x /= len; dir.y /= len; dir.z /= len;
-    const speed = 26 + windSpeed * 0.4;
-    const stepCount = 18;
-    for (let i = 0; i < 11; i++) {
-      const travel = (i / stepCount) * WATER_RANGE;
+    const speed = 22 + windSpeed * 0.35;
+    const contactCount = 5;
+    for (let i = 0; i < contactCount; i++) {
+      const travel = 0.65 + i * 0.9;
       const x = origin.x + dir.x * travel;
-      const y = origin.y + dir.y * travel - 0.35 * travel * 0.15;
+      const y = origin.y + dir.y * travel;
       const z = origin.z + dir.z * travel;
       const cellIndex = getFireGridCellIndex(x, z);
-      if (cellIndex >= 0) applyWaterToCell(cellIndex, 1.0, dt);
+      if (cellIndex >= 0) applyWaterToCell(cellIndex, 0.9, dt);
       const sampleGround = terrainHeight(x, z);
-      if (y <= sampleGround + 0.2) {
-        const groundIndex = getFireGridCellIndex(x, z);
-        if (groundIndex >= 0) applyWaterToCell(groundIndex, 1.2, dt);
-      }
       const particle: WaterParticle = {
         x,
-        y: Math.max(y, sampleGround + 0.2),
+        y: Math.max(y, sampleGround + 0.18),
         z,
-        vx: dir.x * speed + (random() - 0.5) * 2.6,
-        vy: dir.y * speed + (random() - 0.5) * 1.3,
-        vz: dir.z * speed + (random() - 0.5) * 2.6,
+        vx: dir.x * speed + (random() - 0.5) * 2.3,
+        vy: dir.y * speed + (random() - 0.5) * 1.2,
+        vz: dir.z * speed + (random() - 0.5) * 2.3,
         age: 0,
-        life: 0.65 + random() * 0.35,
+        life: 0.42 + random() * 0.18,
         size: 0.12 + random() * 0.08,
       };
       waterCursor = waterParticles.length < WATER_CAPACITY ? waterParticles.length : waterCursor % WATER_CAPACITY;
@@ -1161,10 +1158,12 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     for (let slot = turnCount - 1; slot >= 0; slot--) {
       const index = activeCells[slot];
       if (wetnessTimer[index] > 0) {
-        const damp = Math.min(1, wetnessTimer[index] / 15);
-        age[index] += dt * (4.5 + damp * 9.0 + waterCooling[index] * 6.0);
-        spreadClock[index] += dt * (0.8 + damp * 2.4);
-        emissionClock[index] += dt * (0.7 + damp * 3.0);
+        const damp = Math.min(1, wetnessTimer[index] / MAX_WETNESS);
+        const flameResistance = Math.min(1, flameHeight[index] / 11);
+        const suppression = Math.max(0, (1.2 + damp * 4.2) * (1 - flameResistance * 0.72));
+        age[index] -= dt * suppression;
+        spreadClock[index] += dt * (0.6 + damp * 2.8);
+        emissionClock[index] += dt * (0.7 + damp * 2.6);
       }
       age[index] += dt;
       spreadClock[index] -= dt;
