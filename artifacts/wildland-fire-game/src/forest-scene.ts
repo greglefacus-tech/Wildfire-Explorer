@@ -1,11 +1,7 @@
 import {
   createFireSimulation,
-  FIRE_GRID_ORIGIN,
-  FIRE_GRID_SIZE,
-  FIRE_GRID_CELL_SIZE,
-  getFireGridCellIndex,
   type FireSimulation,
-} from './fire-simulation';
+} from './fire-simulation-world';
 import type { ForestSceneCallbacks, ForestSceneHandle, ToolSelection } from './game-types';
 
 type Collider = { x: number; z: number; radius: number; active?: boolean };
@@ -182,7 +178,6 @@ export async function mountForest(
   terrainGeometry.rotateX(-Math.PI / 2);
   const positions = terrainGeometry.attributes.position;
   const terrainColors = new Float32Array(positions.count * 3);
-  const terrainVerticesByFireCell = new Map<number, number[]>();
   const base = new THREE.Color('#5d6d4d');
   const earth = new THREE.Color('#756c50');
   for (let i = 0; i < positions.count; i++) {
@@ -195,16 +190,8 @@ export async function mountForest(
     terrainColors[i * 3] = color.r;
     terrainColors[i * 3 + 1] = color.g;
     terrainColors[i * 3 + 2] = color.b;
-    const cell = getFireGridCellIndex(x, z);
-    if (cell >= 0) {
-      const vertices = terrainVerticesByFireCell.get(cell) ?? [];
-      vertices.push(i);
-      terrainVerticesByFireCell.set(cell, vertices);
-    }
   }
-  const baseTerrainColors = terrainColors.slice();
   terrainGeometry.setAttribute('color', new THREE.BufferAttribute(terrainColors, 3));
-  const terrainColorAttribute = terrainGeometry.attributes.color;
   terrainGeometry.computeVertexNormals();
   const terrain = new THREE.Mesh(terrainGeometry, new THREE.MeshStandardMaterial({
     vertexColors: true, roughness: 1, metalness: 0,
@@ -219,8 +206,8 @@ export async function mountForest(
     return seed / 4294967296;
   };
   const colliders: Collider[] = [];
-  const treeFuelPoints: { x: number; z: number; height: number }[] = [];
-  const treesByCell = new Map<number, TreeVisualRecord[]>();
+  const treeFuelPoints: { x: number; z: number; height: number; id: number }[] = [];
+  const treeVisuals: TreeVisualRecord[] = [];
   const trunkGeometry = new THREE.CylinderGeometry(0.16, 0.26, 1, 7);
   const trunkMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1 });
   const canopyGeometry = [
@@ -257,7 +244,7 @@ export async function mountForest(
     const y = terrainHeight(x, z);
     const trunkHeight = 3.5 * scale;
     const rotation = random() * Math.PI;
-    treeFuelPoints.push({ x, z, height: 7.05 * scale });
+    treeFuelPoints.push({ x, z, height: 7.05 * scale, id: i });
     placement.position.set(x, y + trunkHeight / 2, z);
     placement.scale.set(scale, trunkHeight, scale);
     placement.rotation.set(0, rotation, 0);
@@ -276,25 +263,7 @@ export async function mountForest(
       canopyInstances[layer].setColorAt(i, canopyColor);
     }
     const visualRecord: TreeVisualRecord = { instanceId: i, charred: false, x, z, y, scale, rotation };
-    const centerCell = getFireGridCellIndex(x, z);
-    if (centerCell >= 0) {
-      const centerColumn = centerCell % FIRE_GRID_SIZE;
-      const centerRow = Math.floor(centerCell / FIRE_GRID_SIZE);
-      for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const column = centerColumn + dx;
-          const row = centerRow + dz;
-          if (column < 0 || column >= FIRE_GRID_SIZE || row < 0 || row >= FIRE_GRID_SIZE) continue;
-          const cellX = FIRE_GRID_ORIGIN + (column + 0.5) * FIRE_GRID_CELL_SIZE;
-          const cellZ = FIRE_GRID_ORIGIN + (row + 0.5) * FIRE_GRID_CELL_SIZE;
-          if (Math.hypot(cellX - x, cellZ - z) > 1.18) continue;
-          const cell = row * FIRE_GRID_SIZE + column;
-          const bucket = treesByCell.get(cell) ?? [];
-          bucket.push(visualRecord);
-          treesByCell.set(cell, bucket);
-        }
-      }
-    }
+    treeVisuals.push(visualRecord);
     colliders.push({ x, z, radius: 0.67 * scale });
   }
   trunkInstances.instanceMatrix.needsUpdate = true;
@@ -323,8 +292,8 @@ export async function mountForest(
   const bushCount = 1100;
   const bushInstances = new THREE.InstancedMesh(bushGeometry, bushMaterial, bushCount);
   bushInstances.frustumCulled = false;
-  const bushFuelPoints: { x: number; z: number }[] = [];
-  const bushesByCell = new Map<number, BushInstanceRecord[]>();
+  const bushFuelPoints: { x: number; z: number; id: number }[] = [];
+  const bushVisuals: BushInstanceRecord[] = [];
   let bushInstanceCount = 0;
   const bushPalette = ['#506e43', '#597647', '#647e4d', '#4b6742'].map((color) => new THREE.Color(color));
   for (let i = 0; i < bushCount; i++) {
@@ -340,30 +309,12 @@ export async function mountForest(
     placement.updateMatrix();
     bushInstances.setMatrixAt(instanceId, placement.matrix);
     bushInstances.setColorAt(instanceId, bushPalette[Math.floor(random() * bushPalette.length)]);
-    bushFuelPoints.push({ x, z });
+    bushFuelPoints.push({ x, z, id: instanceId });
     const collider: Collider = { x, z, radius: 0.55 * scale, active: true };
     colliders.push(collider);
     const rotation = random() * 5;
     const record: BushInstanceRecord = { mesh: bushInstances, instanceId, collider, visible: true, x, z, scale, rotation };
-    const centerCell = getFireGridCellIndex(x, z);
-    if (centerCell >= 0) {
-      const centerColumn = centerCell % FIRE_GRID_SIZE;
-      const centerRow = Math.floor(centerCell / FIRE_GRID_SIZE);
-      for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const column = centerColumn + dx;
-          const row = centerRow + dz;
-          if (column < 0 || column >= FIRE_GRID_SIZE || row < 0 || row >= FIRE_GRID_SIZE) continue;
-          const nearbyX = FIRE_GRID_ORIGIN + (column + 0.5) * FIRE_GRID_CELL_SIZE;
-          const nearbyZ = FIRE_GRID_ORIGIN + (row + 0.5) * FIRE_GRID_CELL_SIZE;
-          if (Math.hypot(nearbyX - x, nearbyZ - z) > 3.6) continue;
-          const nearbyCell = row * FIRE_GRID_SIZE + column;
-          const bucket = bushesByCell.get(nearbyCell) ?? [];
-          bucket.push(record);
-          bushesByCell.set(nearbyCell, bucket);
-        }
-      }
-    }
+    bushVisuals[instanceId] = record;
   }
   bushInstances.count = bushInstanceCount;
   bushInstances.instanceMatrix.needsUpdate = true;
@@ -384,13 +335,15 @@ export async function mountForest(
   // One larger blade mesh fills the widened map without adding draw calls.
   const grassVertices: number[] = [];
   const grassColors: number[] = [];
-  const grassBladesByCell = new Map<number, number[]>();
-  const grassFuelPoints: { x: number; z: number }[] = [];
+  const grassBladesByPatch: number[][] = [];
+  const grassFuelPoints: { x: number; z: number; id: number }[] = [];
   const grassPalette = [new THREE.Color('#91a760'), new THREE.Color('#a2b56c'), new THREE.Color('#809b56')];
   for (let patch = 0; patch < 620; patch++) {
     const cx = (random() - 0.5) * 290;
     const cz = (random() - 0.5) * 290;
-    grassFuelPoints.push({ x: cx, z: cz });
+    grassFuelPoints.push({ x: cx, z: cz, id: patch });
+    const patchBlades: number[] = [];
+    grassBladesByPatch.push(patchBlades);
     const count = 14 + Math.floor(random() * 13);
     for (let blade = 0; blade < count; blade++) {
       const x = cx + (random() - 0.5) * 2.4;
@@ -405,12 +358,7 @@ export async function mountForest(
       const firstVertex = grassVertices.length / 3;
       grassVertices.push(x - dx, y, z - dz, x + dx, y, z + dz, x + lean, y + height, z + lean);
       for (let k = 0; k < 3; k++) grassColors.push(color.r, color.g, color.b);
-      const cell = getFireGridCellIndex(x, z);
-      if (cell >= 0) {
-        const blades = grassBladesByCell.get(cell) ?? [];
-        blades.push(firstVertex);
-        grassBladesByCell.set(cell, blades);
-      }
+      patchBlades.push(firstVertex);
     }
   }
   const grassGeometry = new THREE.BufferGeometry();
@@ -424,22 +372,22 @@ export async function mountForest(
   scene.add(grassMesh);
 
   const grassPosition = grassGeometry.attributes.position;
-  const removeGrassAtCell = (cell: number) => {
-    const blades = grassBladesByCell.get(cell);
+  const removeGrassPatch = (patch: number) => {
+    const blades = grassBladesByPatch[patch];
     if (!blades?.length) return;
     for (const firstVertex of blades) {
       for (let vertex = 0; vertex < 3; vertex++) grassPosition.setY(firstVertex + vertex, -5);
     }
     grassPosition.needsUpdate = true;
   };
-  const hideBushesAtCell = (cell: number, leaveCharredStems = false) => {
-    for (const bush of bushesByCell.get(cell) ?? []) {
-      if (!bush.visible) continue;
+  const hideBush = (instanceId: number, leaveCharredStems = false) => {
+      const bush = bushVisuals[instanceId];
+      if (!bush?.visible) return;
       bush.visible = false;
       bush.collider.active = false;
       bush.mesh.setMatrixAt(bush.instanceId, hiddenPlacement.matrix);
       bush.mesh.instanceMatrix.needsUpdate = true;
-      if (!leaveCharredStems) continue;
+      if (!leaveCharredStems) return;
       const ground = terrainHeight(bush.x, bush.z);
       const branches = [
         { height: 1.1, tiltX: 0.18, tiltZ: -0.34, x: 0, z: 0 },
@@ -459,11 +407,10 @@ export async function mountForest(
         bushSkeletonBranches[branchIndex].setMatrixAt(bush.instanceId, placement.matrix);
         bushSkeletonBranches[branchIndex].instanceMatrix.needsUpdate = true;
       });
-    }
   };
-  const charTreesAtCell = (cell: number) => {
-    for (const tree of treesByCell.get(cell) ?? []) {
-      if (tree.charred) continue;
+  const charTree = (instanceId: number) => {
+      const tree = treeVisuals[instanceId];
+      if (!tree || tree.charred) return;
       tree.charred = true;
       for (const canopy of canopyInstances) {
         canopy.setMatrixAt(tree.instanceId, hiddenPlacement.matrix);
@@ -489,10 +436,7 @@ export async function mountForest(
         treeSkeletonBranches.setMatrixAt(tree.instanceId * 3 + branchIndex, placement.matrix);
         treeSkeletonBranches.instanceMatrix.needsUpdate = true;
       });
-    }
   };
-  const terrainBurnFades: { vertices: number[]; age: number }[] = [];
-  const charredColor = new THREE.Color('#20221d');
   const fireSystem: FireSimulation = createFireSimulation({
     THREE,
     scene,
@@ -502,16 +446,20 @@ export async function mountForest(
     bushes: bushFuelPoints,
     grassPatches: grassFuelPoints,
     onStats: callbacks.onFireStats,
-    onDigCell: (cell) => {
-      removeGrassAtCell(cell);
-      hideBushesAtCell(cell);
+    onDig: (x, z, radius) => {
+      for (let patch = 0; patch < grassFuelPoints.length; patch++) {
+        const fuel = grassFuelPoints[patch];
+        if (Math.hypot(fuel.x - x, fuel.z - z) <= radius + 1.5) removeGrassPatch(patch);
+      }
+      for (const bush of bushVisuals) {
+        if (bush && Math.hypot(bush.x - x, bush.z - z) <= radius + 2.6) hideBush(bush.instanceId);
+      }
     },
-    onCellBurned: (cell) => {
-      const vertices = terrainVerticesByFireCell.get(cell);
-      if (vertices?.length) terrainBurnFades.push({ vertices, age: 0 });
-      removeGrassAtCell(cell);
-      hideBushesAtCell(cell, true);
-      charTreesAtCell(cell);
+    onFuelBurned: (kind, id) => {
+      if (id === undefined) return;
+      if (kind === 'grass') removeGrassPatch(id);
+      if (kind === 'brush') hideBush(id, true);
+      if (kind === 'tree') charTree(id);
     },
   });
 
@@ -715,24 +663,6 @@ export async function mountForest(
       mcleod.rotation.x = 0.02;
       mcleod.rotation.z = -0.48;
     }
-    let terrainColorChanged = false;
-    for (let i = terrainBurnFades.length - 1; i >= 0; i--) {
-      const fade = terrainBurnFades[i];
-      fade.age += dt;
-      const progress = Math.min(1, fade.age / 7.5);
-      for (const vertex of fade.vertices) {
-        const offset = vertex * 3;
-        terrainColors[offset] = baseTerrainColors[offset] * (1 - progress) + charredColor.r * progress;
-        terrainColors[offset + 1] = baseTerrainColors[offset + 1] * (1 - progress) + charredColor.g * progress;
-        terrainColors[offset + 2] = baseTerrainColors[offset + 2] * (1 - progress) + charredColor.b * progress;
-      }
-      terrainColorChanged = true;
-      if (progress >= 1) {
-        terrainBurnFades[i] = terrainBurnFades[terrainBurnFades.length - 1];
-        terrainBurnFades.pop();
-      }
-    }
-    if (terrainColorChanged) terrainColorAttribute.needsUpdate = true;
     const atmosphere = fireSystem.update(dt, now / 1000, camera);
     const fog = scene.fog;
     const targetFog = baseFogColor.clone().lerp(smogFogColor, atmosphere.smog).lerp(heatFogColor, atmosphere.heat);
