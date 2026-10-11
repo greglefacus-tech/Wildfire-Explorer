@@ -16,6 +16,9 @@ type Particle = {
   targetY?: number;
   targetZ?: number;
   arcHeight?: number;
+  turbPhase?: number;
+  turbFreq?: number;
+  turbAmp?: number;
 };
 
 type FireStats = {
@@ -365,9 +368,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         x: x + (random() - 0.5) * CELL_SIZE * 0.45,
         y: ground + 0.4 + random() * Math.max(0.3, flameHeight[index] * 0.22),
         z: z + (random() - 0.5) * CELL_SIZE * 0.45,
-        vx: wind.x * (0.3 + strength * 6.5) + (random() - 0.5) * 1.1,
+        vx: wind.x * (0.3 + strength * 2.8) + (random() - 0.5) * 1.1,
         vy: 0.8 + random() * 2.4 + (crownMask[index] ? 1.5 : 0),
-        vz: wind.z * (0.3 + strength * 6.5) + (random() - 0.5) * 1.1,
+        vz: wind.z * (0.3 + strength * 2.8) + (random() - 0.5) * 1.1,
         age: 0,
         life: 1.6 + random() * 3.0,
       };
@@ -460,7 +463,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const targetY = willIgnite
       ? cellGround[targetIndex] + 0.16
       : terrainHeight(landingX, landingZ) + 0.16;
-    const flightTime = 0.3 + distanceCells * 0.11;
+    const flightTime = 0.9 + distanceCells * 0.35;
     const particle: Particle = {
       x: sourceX,
       y: sourceY,
@@ -478,6 +481,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       targetY,
       targetZ,
       arcHeight: 3 + distanceCells * 1.2,
+      turbPhase: random() * Math.PI * 2,
+      turbFreq: 2.5 + random() * 4.5,
+      turbAmp: 0.6 + random() * 1.8,
     };
     emberCursor = addParticle(emberParticles, emberCapacity, emberCursor, particle);
     return true;
@@ -601,21 +607,31 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       if (particle.spotTargetIndex !== undefined) {
         const progress = particle.age / particle.life;
         const prevX = particle.x, prevY = particle.y, prevZ = particle.z;
-        particle.x = particle.startX! + (particle.targetX! - particle.startX!) * progress;
-        particle.y = particle.startY! + (particle.targetY! - particle.startY!) * progress +
+        const baseX = particle.startX! + (particle.targetX! - particle.startX!) * progress;
+        const baseZ = particle.startZ! + (particle.targetZ! - particle.startZ!) * progress;
+        const baseY = particle.startY! + (particle.targetY! - particle.startY!) * progress +
           Math.sin(Math.PI * progress) * (particle.arcHeight ?? 0);
-        particle.z = particle.startZ! + (particle.targetZ! - particle.startZ!) * progress;
+        const tp = particle.turbPhase ?? 0;
+        const tf = particle.turbFreq ?? 3;
+        const ta = particle.turbAmp ?? 1;
+        const wobble = Math.sin(tp + progress * tf * Math.PI * 2);
+        const wobble2 = Math.cos(tp * 1.7 + progress * tf * 1.3 * Math.PI * 2);
+        const wobble3 = Math.sin(tp * 0.6 + progress * tf * 0.9 * Math.PI * 2);
+        particle.x = baseX + wobble * ta * (1 - progress * 0.5);
+        particle.y = baseY + wobble3 * ta * 0.7 * (1 - progress * 0.3);
+        particle.z = baseZ + wobble2 * ta * (1 - progress * 0.5);
         evx = (particle.x - prevX) / dt;
         evy = (particle.y - prevY) / dt;
         evz = (particle.z - prevZ) / dt;
       } else {
-        const gust = (random() - 0.5) * 0.6 * windStrength;
-        particle.vx += (wind.x * windStrength * 4.0 + gust) * dt;
-        particle.vz += (wind.z * windStrength * 4.0 + gust) * dt;
-        particle.vy += (random() - 0.5) * 0.4 * windStrength * dt;
-        particle.vx *= 0.982;
-        particle.vz *= 0.982;
-        particle.vy *= 0.995;
+        const gust = (random() - 0.5) * 1.2 * windStrength;
+        const gust2 = (random() - 0.5) * 1.2 * windStrength;
+        particle.vx += (wind.x * windStrength * 2.0 + gust) * dt;
+        particle.vz += (wind.z * windStrength * 2.0 + gust2) * dt;
+        particle.vy += ((random() - 0.5) * 0.8 + 0.3 * windStrength) * dt;
+        particle.vx *= 0.975;
+        particle.vz *= 0.975;
+        particle.vy *= 0.99;
         particle.x += particle.vx * dt;
         particle.y += particle.vy * dt;
         particle.z += particle.vz * dt;
@@ -634,7 +650,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       colors[offset + 1] = g;
       colors[offset + 2] = b;
       const speed = Math.hypot(evx, evy, evz);
-      const trailLen = Math.min(speed * 0.045, 0.6);
+      const trailLen = Math.min(speed * 0.022, 0.35);
       const to = i * 6;
       trailPositions[to] = particle.x;
       trailPositions[to + 1] = particle.y;
