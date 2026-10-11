@@ -95,6 +95,11 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const cellZ = (index: number) => GRID_ORIGIN + (Math.floor(index / GRID_SIZE) + 0.5) * CELL_SIZE;
   const columnOf = (index: number) => index % GRID_SIZE;
   const rowOf = (index: number) => Math.floor(index / GRID_SIZE);
+  const cellGround = new Float32Array(CELL_COUNT);
+  const treeHeightByCell = new Float32Array(CELL_COUNT);
+  for (let index = 0; index < CELL_COUNT; index++) {
+    cellGround[index] = terrainHeight(cellX(index), cellZ(index));
+  }
 
   // Continuous grass fuel lets the initial edge fire read as a connected front.
   // Real tree and brush locations override grass with their heavier fuel types.
@@ -110,7 +115,10 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         const index = row * GRID_SIZE + column;
         const dx = cellX(index) - point.x;
         const dz = cellZ(index) - point.z;
-        if (dx * dx + dz * dz <= radius * radius && fuels[index] < fuel) fuels[index] = fuel;
+        if (dx * dx + dz * dz <= radius * radius) {
+          if (fuels[index] < fuel) fuels[index] = fuel;
+          if (fuel === TREE && point.height) treeHeightByCell[index] = Math.max(treeHeightByCell[index], point.height);
+        }
       }
     }
   };
@@ -191,6 +199,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const innerWall = createWallLayer(['#fff0a0', '#ffb233', '#f0440b'], 0.88);
   const frontByRow = new Int32Array(GRID_SIZE);
   const wallXByRow = new Float32Array(GRID_SIZE);
+  const wallGroundByRow = new Float32Array(GRID_SIZE);
   for (let row = 0; row < GRID_SIZE; row++) wallXByRow[row] = cellX(row * GRID_SIZE);
   const setFlameMatrix = (
     mesh: any,
@@ -238,7 +247,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
 
   const smokeTexture = createParticleTexture(THREE, 'smoke');
   const emberTexture = createParticleTexture(THREE, 'ember');
-  const smokeCapacity = 1500;
+  const smokeCapacity = 8500;
   const emberCapacity = 1800;
   const smokePositions = new Float32Array(smokeCapacity * 3);
   const smokeColors = new Float32Array(smokeCapacity * 3);
@@ -248,9 +257,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const emberGeometry = makeParticleGeometry(THREE, emberPositions, emberColors);
   const smokeMaterial = new THREE.PointsMaterial({
     map: smokeTexture,
-    size: 2.6,
+    size: 8.5,
     transparent: true,
-    opacity: 0.34,
+    opacity: 0.58,
     depthWrite: false,
     vertexColors: true,
     sizeAttenuation: true,
@@ -276,6 +285,11 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   let emberCursor = 0;
 
   const hideFlame = (index: number) => {
+    dummy.position.set(0, -1000, 0);
+    dummy.quaternion.identity();
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(0, 0, 0);
+    dummy.updateMatrix();
     outerFlames.setMatrixAt(index, dummy.matrix);
     innerFlames.setMatrixAt(index, dummy.matrix);
     outerFlames.instanceMatrix.needsUpdate = true;
@@ -292,6 +306,18 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       }
     }
     const wind = windVector();
+    for (let row = 0; row < GRID_SIZE; row++) {
+      const index = frontByRow[row];
+      if (index < 0) continue;
+      const targetX = cellX(index);
+      const frontSpeed = 0.2 + windSpeed / 35 * 0.18;
+      wallXByRow[row] += THREE.MathUtils.clamp(
+        targetX - wallXByRow[row],
+        -frontSpeed * currentDelta,
+        frontSpeed * currentDelta,
+      );
+      wallGroundByRow[row] = terrainHeight(wallXByRow[row], GRID_ORIGIN + (row + 0.5) * CELL_SIZE);
+    }
     const writeLayer = (layer: typeof outerWall, inner: boolean) => {
       const positions = layer.positions;
       for (let row = 0; row < GRID_SIZE; row++) {
@@ -306,19 +332,12 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
           }
           continue;
         }
-        const targetX = cellX(index);
-        const frontSpeed = 0.2 + windSpeed / 35 * 0.18;
-        wallXByRow[row] += THREE.MathUtils.clamp(
-          targetX - wallXByRow[row],
-          -frontSpeed * currentDelta,
-          frontSpeed * currentDelta,
-        );
         const x = wallXByRow[row];
         const halfWidth = CELL_SIZE * (inner ? 0.31 : 0.57);
         const z0 = zCenter - halfWidth;
         const z1 = zCenter + halfWidth;
-        const ground0 = terrainHeight(x, z0) + 0.06;
-        const ground1 = terrainHeight(x, z1) + 0.06;
+        const ground0 = wallGroundByRow[row] + 0.06;
+        const ground1 = wallGroundByRow[row] + 0.06;
         const phase = elapsed * (inner ? 2.3 : 1.8) + row * 0.67;
         const gust = Math.sin(phase) * (inner ? 0.22 : 0.5) + Math.sin(phase * 0.43 + 1.1) * 0.24;
         const flameHeight = ((inner ? 1.85 : 2.65) + windSpeed / 35 * (inner ? 1.2 : 2.1) +
@@ -328,18 +347,18 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         const topX1 = frontX - gust * 0.72 + Math.sin(phase + 1.7) * (inner ? 0.12 : 0.24);
         const h0 = flameHeight * (0.83 + Math.sin(phase * 0.81) * 0.14);
         const h1 = flameHeight * (0.83 + Math.sin(phase * 0.81 + 1.3) * 0.14);
-        const points = [
-          [x - 0.16, ground0, z0],
-          [x - 0.16, ground1, z1],
-          [topX1, ground1 + h1, z1],
-          [topX0, ground0 + h0, z0],
-        ];
-        for (let corner = 0; corner < 4; corner++) {
-          const offset = base + corner * 3;
-          positions[offset] = points[corner][0];
-          positions[offset + 1] = points[corner][1];
-          positions[offset + 2] = points[corner][2];
-        }
+        positions[base] = x - 0.16;
+        positions[base + 1] = ground0;
+        positions[base + 2] = z0;
+        positions[base + 3] = x - 0.16;
+        positions[base + 4] = ground1;
+        positions[base + 5] = z1;
+        positions[base + 6] = topX1;
+        positions[base + 7] = ground1 + h1;
+        positions[base + 8] = z1;
+        positions[base + 9] = topX0;
+        positions[base + 10] = ground0 + h0;
+        positions[base + 11] = z0;
       }
       layer.positionAttribute.needsUpdate = true;
     };
@@ -394,21 +413,23 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const type = fuels[index];
     const x = cellX(index);
     const z = cellZ(index);
-    const ground = terrainHeight(x, z);
+    const ground = cellGround[index];
     const wind = windVector();
     const strength = windSpeed / 35;
-    const smokeCount = initial ? (type === GRASS ? 1 : 3) : 1;
+    const smokeCount = initial
+      ? type === GRASS ? 3 : type === BRUSH ? 7 : crownMask[index] ? 10 : 8
+      : type === GRASS ? 2 : type === BRUSH ? 5 : crownMask[index] ? 9 : 6;
     const emberCount = type === GRASS ? 0 : initial ? (type === TREE ? 3 : 2) : crownMask[index] ? 2 : 1;
     for (let i = 0; i < smokeCount; i++) {
       const p: Particle = {
         x: x + (random() - 0.5) * CELL_SIZE * 0.55,
-        y: ground + 0.35 + random() * Math.max(0.5, flameHeight[index] * 0.28),
+        y: ground + 0.45 + random() * Math.max(0.65, flameHeight[index] * 0.34),
         z: z + (random() - 0.5) * CELL_SIZE * 0.55,
         vx: wind.x * (0.16 + strength * 0.8) + (random() - 0.5) * 0.25,
-        vy: 0.55 + random() * 0.8 + (crownMask[index] ? 0.42 : 0),
+        vy: 0.42 + random() * 0.7 + (crownMask[index] ? 0.42 : 0),
         vz: wind.z * (0.16 + strength * 0.8) + (random() - 0.5) * 0.25,
         age: 0,
-        life: 4.5 + random() * 4.5,
+        life: 9 + random() * 6,
       };
       smokeCursor = addParticle(smokeParticles, smokeCapacity, smokeCursor, p);
     }
@@ -448,9 +469,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const type = fuels[index];
     const dense = countDenseNeighbors(index) >= 3;
     const crown = windSpeed >= 22 && type >= BRUSH && dense;
-    const nearbyTreeHeight = trees.find(
-      (tree) => Math.hypot(tree.x - cellX(index), tree.z - cellZ(index)) < 2,
-    )?.height ?? 7.8;
+    const nearbyTreeHeight = treeHeightByCell[index] || 7.8;
     states[index] = BURNING;
     crownMask[index] = crown ? 1 : 0;
     age[index] = 0;
@@ -481,8 +500,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     if (type === GRASS) {
       hideFlame(index);
     } else {
-      setFlameMatrix(outerFlames, index, x, z, terrainHeight(x, z), CELL_SIZE * 1.22, flameHeight[index], 0);
-      setFlameMatrix(innerFlames, index, x, z, terrainHeight(x, z), CELL_SIZE * 0.68, flameHeight[index] * 0.58, 0.02);
+      setFlameMatrix(outerFlames, index, x, z, cellGround[index], CELL_SIZE * 1.22, flameHeight[index], 0);
+      setFlameMatrix(innerFlames, index, x, z, cellGround[index], CELL_SIZE * 0.68, flameHeight[index] * 0.58, 0.02);
     }
     emitForCell(index, true);
     statsDirty = true;
@@ -506,7 +525,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     if (dirtCount >= CELL_COUNT) return;
     const x = cellX(index);
     const z = cellZ(index);
-    dummy.position.set(x, terrainHeight(x, z) + 0.035, z);
+    dummy.position.set(x, cellGround[index] + 0.035, z);
     dummy.rotation.set(0, random() * Math.PI * 2, 0);
     const diameter = CELL_SIZE * (1.06 + random() * 0.12);
     dummy.scale.set(diameter, diameter, diameter);
@@ -592,7 +611,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       positions[offset + 1] = particle.y;
       positions[offset + 2] = particle.z;
       if (kind === 'smoke') {
-        const shade = 0.18 + fade * 0.3;
+        const shade = 0.22 + fade * 0.35;
         colors[offset] = shade * 0.86;
         colors[offset + 1] = shade * 0.88;
         colors[offset + 2] = shade * 0.82;
@@ -616,7 +635,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     // The west-edge line advances east. Adjacent diagonals overlap the cells
     // along the front, while reverse spread and isolated spot fires are disabled.
     const directions = [[1, -1], [1, 0], [1, 1]];
-    const sourceHeight = terrainHeight(cellX(sourceIndex), cellZ(sourceIndex));
+    const sourceHeight = cellGround[sourceIndex];
     for (const [dx, dz] of directions) {
       const nextColumn = column + dx;
       const nextRow = row + dz;
@@ -630,7 +649,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         ? 1 + alignment * windStrength * 2.75
         : Math.max(0.08, 1 + alignment * windStrength * 0.9);
       const baseProbability = targetFuel === GRASS ? 0.04 : targetFuel === BRUSH ? 0.48 : 0.72;
-      const slope = (terrainHeight(cellX(next), cellZ(next)) - sourceHeight) / CELL_SIZE;
+      const slope = (cellGround[next] - sourceHeight) / CELL_SIZE;
       const slopeFactor = Math.max(0.65, Math.min(1.48, 1 + slope * 0.5));
       const crownFactor = crownMask[sourceIndex] ? 1.65 : 1;
       const windFactor = 0.75 + windStrength * 1.25;
@@ -669,7 +688,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       if (fuels[index] === GRASS) continue;
       const x = cellX(index);
       const z = cellZ(index);
-      const ground = terrainHeight(x, z);
+      const ground = cellGround[index];
       const phase = elapsed * (crownMask[index] ? 9.5 : 7.1) + index * 0.73;
       const flicker = 0.88 + Math.sin(phase) * 0.075 + Math.sin(phase * 2.31) * 0.035;
       const height = flameHeight[index] * flicker * burnLifeFactor(index);

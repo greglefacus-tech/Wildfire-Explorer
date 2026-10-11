@@ -9,7 +9,25 @@ import {
 import type { ForestSceneCallbacks, ForestSceneHandle } from './game-types';
 
 type Collider = { x: number; z: number; radius: number; active?: boolean };
-type BushInstanceRecord = { mesh: any; instanceId: number; collider: Collider; visible: boolean };
+type BushInstanceRecord = {
+  mesh: any;
+  instanceId: number;
+  collider: Collider;
+  visible: boolean;
+  x: number;
+  z: number;
+  scale: number;
+  rotation: number;
+};
+type TreeVisualRecord = {
+  instanceId: number;
+  charred: boolean;
+  x: number;
+  z: number;
+  y: number;
+  scale: number;
+  rotation: number;
+};
 
 /**
  * All Three.js code is intentionally loaded in the browser from the import map.
@@ -125,6 +143,7 @@ export async function mountForest(
   };
   const colliders: Collider[] = [];
   const treeFuelPoints: { x: number; z: number; height: number }[] = [];
+  const treesByCell = new Map<number, TreeVisualRecord[]>();
   const trunkGeometry = new THREE.CylinderGeometry(0.16, 0.26, 1, 7);
   const trunkMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1 });
   const canopyGeometry = [
@@ -160,13 +179,15 @@ export async function mountForest(
     const scale = 0.78 + random() * 0.62;
     const y = terrainHeight(x, z);
     const trunkHeight = 3.5 * scale;
+    const rotation = random() * Math.PI;
     treeFuelPoints.push({ x, z, height: 7.05 * scale });
     placement.position.set(x, y + trunkHeight / 2, z);
     placement.scale.set(scale, trunkHeight, scale);
-    placement.rotation.set(0, random() * Math.PI, 0);
+    placement.rotation.set(0, rotation, 0);
     placement.updateMatrix();
     trunkInstances.setMatrixAt(i, placement.matrix);
-    trunkInstances.setColorAt(i, new THREE.Color('#4d4332').multiplyScalar(0.88 + random() * 0.22));
+    const trunkColor = new THREE.Color('#4d4332').multiplyScalar(0.88 + random() * 0.22);
+    trunkInstances.setColorAt(i, trunkColor);
     for (let layer = 0; layer < 3; layer++) {
       placement.position.set(x, y + trunkHeight + 0.25 + layer * 1.23 * scale, z);
       placement.scale.set(scale, scale, scale);
@@ -174,7 +195,28 @@ export async function mountForest(
       placement.updateMatrix();
       canopyInstances[layer].setMatrixAt(i, placement.matrix);
       const shade = canopyPalettes[layer][Math.floor(random() * canopyPalettes[layer].length)];
-      canopyInstances[layer].setColorAt(i, shade.clone().multiplyScalar(0.9 + random() * 0.2));
+      const canopyColor = shade.clone().multiplyScalar(0.9 + random() * 0.2);
+      canopyInstances[layer].setColorAt(i, canopyColor);
+    }
+    const visualRecord: TreeVisualRecord = { instanceId: i, charred: false, x, z, y, scale, rotation };
+    const centerCell = getFireGridCellIndex(x, z);
+    if (centerCell >= 0) {
+      const centerColumn = centerCell % FIRE_GRID_SIZE;
+      const centerRow = Math.floor(centerCell / FIRE_GRID_SIZE);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const column = centerColumn + dx;
+          const row = centerRow + dz;
+          if (column < 0 || column >= FIRE_GRID_SIZE || row < 0 || row >= FIRE_GRID_SIZE) continue;
+          const cellX = FIRE_GRID_ORIGIN + (column + 0.5) * FIRE_GRID_CELL_SIZE;
+          const cellZ = FIRE_GRID_ORIGIN + (row + 0.5) * FIRE_GRID_CELL_SIZE;
+          if (Math.hypot(cellX - x, cellZ - z) > 1.18) continue;
+          const cell = row * FIRE_GRID_SIZE + column;
+          const bucket = treesByCell.get(cell) ?? [];
+          bucket.push(visualRecord);
+          treesByCell.set(cell, bucket);
+        }
+      }
     }
     colliders.push({ x, z, radius: 0.67 * scale });
   }
@@ -186,6 +228,17 @@ export async function mountForest(
     scene.add(mesh);
   }
   scene.add(trunkInstances);
+  const treeBranchGeometry = new THREE.CylinderGeometry(0.035, 0.075, 1, 5);
+  const treeBranchMaterial = new THREE.MeshStandardMaterial({ color: '#211f19', roughness: 1 });
+  const treeSkeletonBranches = new THREE.InstancedMesh(treeBranchGeometry, treeBranchMaterial, treeCount * 3);
+  treeSkeletonBranches.frustumCulled = false;
+  const hiddenPlacement = new THREE.Object3D();
+  hiddenPlacement.position.set(0, -100, 0);
+  hiddenPlacement.scale.set(0, 0, 0);
+  hiddenPlacement.updateMatrix();
+  for (let i = 0; i < treeCount * 3; i++) treeSkeletonBranches.setMatrixAt(i, hiddenPlacement.matrix);
+  treeSkeletonBranches.instanceMatrix.needsUpdate = true;
+  scene.add(treeSkeletonBranches);
 
   // Instancing keeps the denser brush field to a single draw call.
   const bushGeometry = new THREE.IcosahedronGeometry(0.6, 1);
@@ -213,7 +266,8 @@ export async function mountForest(
     bushFuelPoints.push({ x, z });
     const collider: Collider = { x, z, radius: 0.55 * scale, active: true };
     colliders.push(collider);
-    const record: BushInstanceRecord = { mesh: bushInstances, instanceId, collider, visible: true };
+    const rotation = random() * 5;
+    const record: BushInstanceRecord = { mesh: bushInstances, instanceId, collider, visible: true, x, z, scale, rotation };
     const centerCell = getFireGridCellIndex(x, z);
     if (centerCell >= 0) {
       const centerColumn = centerCell % FIRE_GRID_SIZE;
@@ -238,6 +292,17 @@ export async function mountForest(
   bushInstances.instanceMatrix.needsUpdate = true;
   if (bushInstances.instanceColor) bushInstances.instanceColor.needsUpdate = true;
   scene.add(bushInstances);
+  const bushStemGeometry = new THREE.CylinderGeometry(0.022, 0.052, 1, 5);
+  const bushStemMaterial = new THREE.MeshStandardMaterial({ color: '#211f19', roughness: 1 });
+  const bushSkeletonBranches = Array.from({ length: 3 }, () => {
+    const mesh = new THREE.InstancedMesh(bushStemGeometry, bushStemMaterial, bushInstanceCount);
+    mesh.count = bushInstanceCount;
+    mesh.frustumCulled = false;
+    for (let i = 0; i < bushInstanceCount; i++) mesh.setMatrixAt(i, hiddenPlacement.matrix);
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+    return mesh;
+  });
 
   // One larger blade mesh fills the widened map without adding draw calls.
   const grassVertices: number[] = [];
@@ -290,17 +355,63 @@ export async function mountForest(
     }
     grassPosition.needsUpdate = true;
   };
-  const hideBushesAtCell = (cell: number) => {
+  const hideBushesAtCell = (cell: number, leaveCharredStems = false) => {
     for (const bush of bushesByCell.get(cell) ?? []) {
       if (!bush.visible) continue;
       bush.visible = false;
       bush.collider.active = false;
-      placement.position.set(0, -100, 0);
-      placement.scale.set(0, 0, 0);
-      placement.rotation.set(0, 0, 0);
-      placement.updateMatrix();
-      bush.mesh.setMatrixAt(bush.instanceId, placement.matrix);
+      bush.mesh.setMatrixAt(bush.instanceId, hiddenPlacement.matrix);
       bush.mesh.instanceMatrix.needsUpdate = true;
+      if (!leaveCharredStems) continue;
+      const ground = terrainHeight(bush.x, bush.z);
+      const branches = [
+        { height: 1.1, tiltX: 0.18, tiltZ: -0.34, x: 0, z: 0 },
+        { height: 0.88, tiltX: -0.38, tiltZ: 0.25, x: 0.1, z: -0.04 },
+        { height: 0.76, tiltX: 0.32, tiltZ: 0.48, x: -0.08, z: 0.05 },
+      ];
+      branches.forEach((branch, branchIndex) => {
+        const height = bush.scale * branch.height;
+        placement.position.set(
+          bush.x + branch.x * bush.scale,
+          ground + height / 2,
+          bush.z + branch.z * bush.scale,
+        );
+        placement.scale.set(bush.scale * 0.62, height, bush.scale * 0.62);
+        placement.rotation.set(branch.tiltX, bush.rotation + branchIndex * 1.6, branch.tiltZ);
+        placement.updateMatrix();
+        bushSkeletonBranches[branchIndex].setMatrixAt(bush.instanceId, placement.matrix);
+        bushSkeletonBranches[branchIndex].instanceMatrix.needsUpdate = true;
+      });
+    }
+  };
+  const charTreesAtCell = (cell: number) => {
+    for (const tree of treesByCell.get(cell) ?? []) {
+      if (tree.charred) continue;
+      tree.charred = true;
+      for (const canopy of canopyInstances) {
+        canopy.setMatrixAt(tree.instanceId, hiddenPlacement.matrix);
+        canopy.instanceMatrix.needsUpdate = true;
+      }
+      trunkInstances.setColorAt(tree.instanceId, new THREE.Color('#171814'));
+      if (trunkInstances.instanceColor) trunkInstances.instanceColor.needsUpdate = true;
+      const branches = [
+        { height: 1.65, tiltX: 0.22, tiltZ: -0.54, yaw: -0.8 },
+        { height: 1.45, tiltX: -0.32, tiltZ: 0.49, yaw: 1.1 },
+        { height: 1.2, tiltX: 0.42, tiltZ: 0.26, yaw: 2.5 },
+      ];
+      branches.forEach((branch, branchIndex) => {
+        const height = tree.scale * branch.height;
+        placement.position.set(
+          tree.x + Math.cos(tree.rotation + branch.yaw) * tree.scale * 0.2,
+          tree.y + tree.scale * 3.0 + height / 2,
+          tree.z + Math.sin(tree.rotation + branch.yaw) * tree.scale * 0.2,
+        );
+        placement.scale.set(tree.scale * 0.68, height, tree.scale * 0.68);
+        placement.rotation.set(branch.tiltX, tree.rotation + branch.yaw, branch.tiltZ);
+        placement.updateMatrix();
+        treeSkeletonBranches.setMatrixAt(tree.instanceId * 3 + branchIndex, placement.matrix);
+        treeSkeletonBranches.instanceMatrix.needsUpdate = true;
+      });
     }
   };
   const terrainBurnFades: { vertices: number[]; age: number }[] = [];
@@ -322,7 +433,8 @@ export async function mountForest(
       const vertices = terrainVerticesByFireCell.get(cell);
       if (vertices?.length) terrainBurnFades.push({ vertices, age: 0 });
       removeGrassAtCell(cell);
-      hideBushesAtCell(cell);
+      hideBushesAtCell(cell, true);
+      charTreesAtCell(cell);
     },
   });
 
