@@ -91,7 +91,8 @@ const PYRO_CAPACITY = PYRO_COLUMN_MAX * PYRO_PUFFS_PER_COLUMN;
 const SMOG_WALL_PUFFS = 40;
 const ASH_CAPACITY = 1200;
 const BLIZZARD_CAPACITY = 2200;
-const WATER_CAPACITY = 1400;
+const WATER_CAPACITY = 2000;
+const WATER_IMPACT_CAPACITY = 420;
 const BASE_FOG_DENSITY = 0.016;
 const WATER_RANGE = 22;
 const MAX_WETNESS = 5;
@@ -320,9 +321,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const waterGeometry = makeParticleGeometry(THREE, waterPositions, waterColors);
   const waterMaterial = new THREE.PointsMaterial({
     map: waterTexture,
-    size: 0.18,
+    size: 0.34,
     transparent: true,
-    opacity: 0.8,
+    opacity: 0.9,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     vertexColors: true,
@@ -331,6 +332,22 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const waterPoints = new THREE.Points(waterGeometry, waterMaterial);
   waterPoints.frustumCulled = false;
   scene.add(waterPoints);
+  const impactPositions = new Float32Array(WATER_IMPACT_CAPACITY * 3);
+  const impactColors = new Float32Array(WATER_IMPACT_CAPACITY * 3);
+  const impactGeometry = makeParticleGeometry(THREE, impactPositions, impactColors);
+  const impactMaterial = new THREE.PointsMaterial({
+    map: waterTexture,
+    size: 0.72,
+    transparent: true,
+    opacity: 0.8,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true,
+    sizeAttenuation: true,
+  });
+  const impactPoints = new THREE.Points(impactGeometry, impactMaterial);
+  impactPoints.frustumCulled = false;
+  scene.add(impactPoints);
   const ashPositions = new Float32Array(ASH_CAPACITY * 3);
   const ashColors = new Float32Array(ASH_CAPACITY * 3);
   const ashGeometry = makeParticleGeometry(THREE, ashPositions, ashColors);
@@ -384,6 +401,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   let emberCursor = 0;
   const waterParticles: WaterParticle[] = [];
   let waterCursor = 0;
+  const impactParticles: Particle[] = [];
+  let impactCursor = 0;
   const ashParticles: Particle[] = [];
   let ashCursor = 0;
   const blizzardParticles: Particle[] = [];
@@ -605,7 +624,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     for (let i = waterParticles.length - 1; i >= 0; i--) {
       const particle = waterParticles[i];
       particle.age += dt;
-      particle.vy += -9.8 * dt;
+      particle.vy += -9.8 * dt * 0.42;
       particle.x += particle.vx * dt;
       particle.y += particle.vy * dt;
       particle.z += particle.vz * dt;
@@ -614,29 +633,69 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       positions[offset + 1] = particle.y;
       positions[offset + 2] = particle.z;
       const fade = 1 - particle.age / particle.life;
-      colors[offset] = 0.5 + fade * 0.45;
-      colors[offset + 1] = 0.78 + fade * 0.18;
-      colors[offset + 2] = 0.9 + fade * 0.08;
-      if (particle.age >= particle.life || particle.y <= terrainHeight(particle.x, particle.z) + 0.15) {
+      colors[offset] = 0.68 + fade * 0.22;
+      colors[offset + 1] = 0.82 + fade * 0.17;
+      colors[offset + 2] = 1.0;
+      const impactGround = particle.y <= terrainHeight(particle.x, particle.z) + 0.12;
+      if (particle.age >= particle.life || impactGround) {
         const impactIndex = getFireGridCellIndex(particle.x, particle.z);
         if (impactIndex >= 0) {
-          wetnessTimer[impactIndex] = Math.min(MAX_WETNESS, wetnessTimer[impactIndex] + 3.2);
+          wetnessTimer[impactIndex] = Math.min(MAX_WETNESS, wetnessTimer[impactIndex] + 2.5);
           if (states[impactIndex] === BURNING) {
-            waterCooling[impactIndex] = Math.min(1.2, waterCooling[impactIndex] + 0.55);
+            waterCooling[impactIndex] = Math.min(0.9, waterCooling[impactIndex] + 0.36);
+          }
+        }
+        if (impactGround) {
+          for (let burst = 0; burst < 8; burst++) {
+            impactCursor = addParticle(impactParticles, WATER_IMPACT_CAPACITY, impactCursor, {
+              x: particle.x + (random() - 0.5) * 0.55,
+              y: particle.y + 0.18 + random() * 0.5,
+              z: particle.z + (random() - 0.5) * 0.55,
+              vx: (random() - 0.5) * 1.4,
+              vy: 0.8 + random() * 1.2,
+              vz: (random() - 0.5) * 1.4,
+              age: 0,
+              life: 0.38 + random() * 0.26,
+            });
           }
         }
         waterParticles.splice(i, 1);
-        if (i < waterParticles.length) {
-          const nextIndex = i * 3;
-          positions[nextIndex] = waterParticles[i]?.x ?? 0;
-          positions[nextIndex + 1] = waterParticles[i]?.y ?? 0;
-          positions[nextIndex + 2] = waterParticles[i]?.z ?? 0;
-        }
       }
     }
     waterGeometry.setDrawRange(0, waterParticles.length);
     waterGeometry.attributes.position.needsUpdate = true;
     waterGeometry.attributes.color.needsUpdate = true;
+  };
+
+  const updateImpactParticles = (dt: number) => {
+    const positions = impactPositions;
+    const colors = impactColors;
+    for (let i = impactParticles.length - 1; i >= 0; i--) {
+      const particle = impactParticles[i];
+      particle.age += dt;
+      particle.vy -= 3.8 * dt;
+      particle.x += particle.vx * dt;
+      particle.y += particle.vy * dt;
+      particle.z += particle.vz * dt;
+      const offset = i * 3;
+      positions[offset] = particle.x;
+      positions[offset + 1] = particle.y;
+      positions[offset + 2] = particle.z;
+      const fade = 1 - particle.age / particle.life;
+      colors[offset] = 0.6 + fade * 0.35;
+      colors[offset + 1] = 0.78 + fade * 0.2;
+      colors[offset + 2] = 1.0;
+      if (particle.age >= particle.life) {
+        const last = impactParticles.length - 1;
+        if (last !== i) {
+          impactParticles[i] = impactParticles[last];
+        }
+        impactParticles.pop();
+      }
+    }
+    impactGeometry.setDrawRange(0, impactParticles.length);
+    impactGeometry.attributes.position.needsUpdate = true;
+    impactGeometry.attributes.color.needsUpdate = true;
   };
 
   const updateVisualParticles = (
@@ -958,26 +1017,25 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const dir = { x: direction.x, y: direction.y, z: direction.z };
     const len = Math.hypot(dir.x, dir.y, dir.z) || 1;
     dir.x /= len; dir.y /= len; dir.z /= len;
-    const speed = 22 + windSpeed * 0.35;
-    const contactCount = 5;
-    for (let i = 0; i < contactCount; i++) {
-      const travel = 0.65 + i * 0.9;
+    const speed = 58 + windSpeed * 1.6;
+    const streamCount = 20;
+    for (let i = 0; i < streamCount; i++) {
+      const travel = 0.18 + i * 0.34;
       const x = origin.x + dir.x * travel;
       const y = origin.y + dir.y * travel;
       const z = origin.z + dir.z * travel;
       const cellIndex = getFireGridCellIndex(x, z);
-      if (cellIndex >= 0) applyWaterToCell(cellIndex, 0.9, dt);
-      const sampleGround = terrainHeight(x, z);
+      if (cellIndex >= 0) applyWaterToCell(cellIndex, 1.1, dt);
       const particle: WaterParticle = {
         x,
-        y: Math.max(y, sampleGround + 0.18),
+        y: y,
         z,
-        vx: dir.x * speed + (random() - 0.5) * 2.3,
-        vy: dir.y * speed + (random() - 0.5) * 1.2,
-        vz: dir.z * speed + (random() - 0.5) * 2.3,
+        vx: dir.x * speed + (random() - 0.5) * 2.8,
+        vy: dir.y * speed + (random() - 0.5) * 1.6,
+        vz: dir.z * speed + (random() - 0.5) * 2.8,
         age: 0,
-        life: 0.42 + random() * 0.18,
-        size: 0.12 + random() * 0.08,
+        life: 0.18 + random() * 0.12,
+        size: 0.10 + random() * 0.18,
       };
       waterCursor = waterParticles.length < WATER_CAPACITY ? waterParticles.length : waterCursor % WATER_CAPACITY;
       if (waterParticles.length < WATER_CAPACITY) {
@@ -1253,6 +1311,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     spawnAmbientAsh(camera, ashParticles.length < 240 ? 48 : ashParticles.length < ASH_CAPACITY * 0.78 ? 16 : 2);
     spawnEmberBlizzard(camera, emberStorm, dt);
     updateWaterParticles(dt);
+    updateImpactParticles(dt);
     updateParticleList(emberParticles, dt, emberPositions, emberColors, (targetIndex) => {
       ignite(targetIndex);
     });
@@ -1300,6 +1359,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       waterGeometry.dispose();
       waterTexture.dispose();
       waterMaterial.dispose();
+      impactGeometry.dispose();
+      impactMaterial.dispose();
       ashGeometry.dispose();
       blizzardGeometry.dispose();
       trailGeometry.dispose();
