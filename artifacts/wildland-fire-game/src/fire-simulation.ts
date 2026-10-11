@@ -41,9 +41,20 @@ type FireSystemOptions = {
   onCellBurned?: (cellIndex: number) => void;
 };
 
+export type AtmosphereState = {
+  heat: number;
+  smog: number;
+  emberStorm: number;
+  fogDensity: number;
+  glowX: number;
+  glowY: number;
+  glowZ: number;
+  glowStrength: number;
+};
+
 export type FireSimulation = {
   setWind: (directionDegrees: number, speedMph: number) => void;
-  update: (dt: number, elapsed: number, camera: any) => void;
+  update: (dt: number, elapsed: number, camera: any) => AtmosphereState;
   digAt: (x: number, z: number) => void;
   endTrench: () => void;
   getStats: () => FireStats;
@@ -57,8 +68,17 @@ const GRID_SIZE = FIRE_GRID_SIZE;
 const CELL_SIZE = FIRE_GRID_CELL_SIZE;
 const GRID_ORIGIN = FIRE_GRID_ORIGIN;
 const CELL_COUNT = GRID_SIZE * GRID_SIZE;
-const SMOKE_CLOUD_ALTITUDE = 42;
 const SPOTTING_WIND_THRESHOLD_MPH = 18;
+const PYRO_CLUSTER_CELLS = 8;
+const PYRO_CLUSTER_DIM = GRID_SIZE / PYRO_CLUSTER_CELLS;
+const PYRO_CLUSTER_COUNT = PYRO_CLUSTER_DIM * PYRO_CLUSTER_DIM;
+const PYRO_COLUMN_MAX = 12;
+const PYRO_PUFFS_PER_COLUMN = 20;
+const PYRO_CAPACITY = PYRO_COLUMN_MAX * PYRO_PUFFS_PER_COLUMN;
+const SMOG_WALL_PUFFS = 40;
+const ASH_CAPACITY = 1200;
+const BLIZZARD_CAPACITY = 2200;
+const BASE_FOG_DENSITY = 0.016;
 
 export function getFireGridCellIndex(x: number, z: number) {
   const column = Math.floor((x - GRID_ORIGIN) / CELL_SIZE);
@@ -78,7 +98,8 @@ const FIREBREAK = 3;
 
 /**
  * A small cellular-automata fire model. The simulation grid is invisible;
- * instanced flame billboards and one lightweight smoke cloud provide the visuals.
+ * instanced flame billboards, pooled pyrocumulus columns, and atmospheric
+ * particles provide the visuals.
  */
 export function createFireSimulation(options: FireSystemOptions): FireSimulation {
   const { THREE, scene, terrainHeight, random, trees, bushes, grassPatches } = options;
@@ -166,6 +187,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   outerFlames.frustumCulled = false;
   innerFlames.frustumCulled = false;
   const dummy = new THREE.Object3D();
+  const pyroColor = new THREE.Color();
   dummy.scale.set(0, 0, 0);
   dummy.updateMatrix();
   for (let i = 0; i < CELL_COUNT; i++) {
@@ -219,26 +241,48 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   let dirtCount = 0;
 
   const smokeTexture = createParticleTexture(THREE, 'smoke');
+  const smogTexture = createParticleTexture(THREE, 'smog');
   const emberTexture = createParticleTexture(THREE, 'ember');
-  const smokeCloudPuffCount = 24;
+  const ashTexture = createParticleTexture(THREE, 'ash');
   const emberCapacity = 3000;
   const emberPositions = new Float32Array(emberCapacity * 3);
   const emberColors = new Float32Array(emberCapacity * 3);
   const emberGeometry = makeParticleGeometry(THREE, emberPositions, emberColors);
-  const smokeMaterial = new THREE.MeshBasicMaterial({
+  const pyroMaterial = new THREE.MeshBasicMaterial({
     map: smokeTexture,
-    color: '#77766f',
+    color: '#4a433c',
     transparent: true,
-    opacity: 0.42,
+    opacity: 0.28,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.NormalBlending,
+    vertexColors: true,
+    fog: true,
+  });
+  const pyroColumns = new THREE.InstancedMesh(plane, pyroMaterial, PYRO_CAPACITY);
+  pyroColumns.count = PYRO_CAPACITY;
+  pyroColumns.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  pyroColumns.frustumCulled = false;
+  for (let i = 0; i < PYRO_CAPACITY; i++) {
+    pyroColumns.setMatrixAt(i, dummy.matrix);
+    pyroColumns.setColorAt(i, pyroColor.setRGB(0.28, 0.24, 0.2));
+  }
+  if (pyroColumns.instanceColor) pyroColumns.instanceColor.needsUpdate = true;
+  scene.add(pyroColumns);
+  const smogMaterial = new THREE.MeshBasicMaterial({
+    map: smogTexture,
+    color: '#5a4a38',
+    transparent: true,
+    opacity: 0.0,
     depthWrite: false,
     side: THREE.DoubleSide,
   });
-  const smokeCloud = new THREE.InstancedMesh(plane, smokeMaterial, smokeCloudPuffCount);
-  smokeCloud.count = smokeCloudPuffCount;
-  smokeCloud.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  smokeCloud.frustumCulled = false;
-  for (let i = 0; i < smokeCloudPuffCount; i++) smokeCloud.setMatrixAt(i, dummy.matrix);
-  scene.add(smokeCloud);
+  const smogWall = new THREE.InstancedMesh(plane, smogMaterial, SMOG_WALL_PUFFS);
+  smogWall.count = SMOG_WALL_PUFFS;
+  smogWall.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  smogWall.frustumCulled = false;
+  for (let i = 0; i < SMOG_WALL_PUFFS; i++) smogWall.setMatrixAt(i, dummy.matrix);
+  scene.add(smogWall);
   const emberMaterial = new THREE.PointsMaterial({
     map: emberTexture,
     size: 0.16,
@@ -252,6 +296,37 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   const emberPoints = new THREE.Points(emberGeometry, emberMaterial);
   emberPoints.frustumCulled = false;
   scene.add(emberPoints);
+  const ashPositions = new Float32Array(ASH_CAPACITY * 3);
+  const ashColors = new Float32Array(ASH_CAPACITY * 3);
+  const ashGeometry = makeParticleGeometry(THREE, ashPositions, ashColors);
+  const ashMaterial = new THREE.PointsMaterial({
+    map: ashTexture,
+    size: 0.11,
+    transparent: true,
+    opacity: 0.55,
+    depthWrite: false,
+    vertexColors: true,
+    sizeAttenuation: true,
+  });
+  const ashPoints = new THREE.Points(ashGeometry, ashMaterial);
+  ashPoints.frustumCulled = false;
+  scene.add(ashPoints);
+  const blizzardPositions = new Float32Array(BLIZZARD_CAPACITY * 3);
+  const blizzardColors = new Float32Array(BLIZZARD_CAPACITY * 3);
+  const blizzardGeometry = makeParticleGeometry(THREE, blizzardPositions, blizzardColors);
+  const blizzardMaterial = new THREE.PointsMaterial({
+    map: emberTexture,
+    size: 0.14,
+    transparent: true,
+    opacity: 0.92,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true,
+    sizeAttenuation: true,
+  });
+  const blizzardPoints = new THREE.Points(blizzardGeometry, blizzardMaterial);
+  blizzardPoints.frustumCulled = false;
+  scene.add(blizzardPoints);
 
   // Ember trail streaks: one LineSegments draw call, 2 vertices per ember.
   // Tail position is extrapolated backward from velocity so wind-blown
@@ -272,6 +347,33 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
 
   const emberParticles: Particle[] = [];
   let emberCursor = 0;
+  const ashParticles: Particle[] = [];
+  let ashCursor = 0;
+  const blizzardParticles: Particle[] = [];
+  let blizzardCursor = 0;
+  const pyroClusterHeat = new Float32Array(PYRO_CLUSTER_COUNT);
+  const pyroClusterX = new Float32Array(PYRO_CLUSTER_COUNT);
+  const pyroClusterZ = new Float32Array(PYRO_CLUSTER_COUNT);
+  const pyroClusterGround = new Float32Array(PYRO_CLUSTER_COUNT);
+  const pyroClusterN = new Uint16Array(PYRO_CLUSTER_COUNT);
+  const pyroColumnsState = Array.from({ length: PYRO_COLUMN_MAX }, () => ({
+    active: false,
+    x: 0,
+    z: 0,
+    ground: 0,
+    intensity: 0,
+    seed: random(),
+  }));
+  const atmosphere: AtmosphereState = {
+    heat: 0,
+    smog: 0,
+    emberStorm: 0,
+    fogDensity: BASE_FOG_DENSITY,
+    glowX: 0,
+    glowY: 8,
+    glowZ: 0,
+    glowStrength: 0,
+  };
 
   const hideFlame = (index: number) => {
     dummy.position.set(0, -1000, 0);
@@ -285,31 +387,233 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     innerFlames.instanceMatrix.needsUpdate = true;
   };
 
-  const updateSmokeCloud = (elapsed: number, camera: any) => {
-    const wind = windVector();
-    for (let puff = 0; puff < smokeCloudPuffCount; puff++) {
-      const row = Math.round(puff * (GRID_SIZE - 1) / (smokeCloudPuffCount - 1));
-      const index = frontByRow[row];
-      if (index < 0) {
-        dummy.position.set(0, -1000, 0);
-        dummy.scale.set(0, 0, 0);
-        dummy.quaternion.identity();
-        dummy.updateMatrix();
-        smokeCloud.setMatrixAt(puff, dummy.matrix);
+  const hideSprite = (mesh: any, index: number) => {
+    dummy.position.set(0, -2000, 0);
+    dummy.scale.set(0, 0, 0);
+    dummy.quaternion.identity();
+    dummy.updateMatrix();
+    mesh.setMatrixAt(index, dummy.matrix);
+  };
+
+  const clusterOf = (index: number) => {
+    const column = Math.floor(columnOf(index) / PYRO_CLUSTER_CELLS);
+    const row = Math.floor(rowOf(index) / PYRO_CLUSTER_CELLS);
+    return row * PYRO_CLUSTER_DIM + column;
+  };
+
+  const bandFalloff = (value: number, center: number, width: number) => {
+    const t = Math.abs(value - center) / width;
+    return t >= 1 ? 0 : 1 - t * t;
+  };
+
+  const updatePyrocumulus = (elapsed: number, camera: any) => {
+    pyroClusterHeat.fill(0);
+    pyroClusterX.fill(0);
+    pyroClusterZ.fill(0);
+    pyroClusterGround.fill(0);
+    pyroClusterN.fill(0);
+    for (const index of activeCells) {
+      const weight = crownMask[index]
+        ? 3.2
+        : fuels[index] === TREE
+          ? 1.8
+          : fuels[index] === BRUSH
+            ? 0.9
+            : 0.22;
+      const cluster = clusterOf(index);
+      const mass = weight * burnLifeFactor(index);
+      pyroClusterHeat[cluster] += mass;
+      pyroClusterX[cluster] += cellX(index) * mass;
+      pyroClusterZ[cluster] += cellZ(index) * mass;
+      pyroClusterGround[cluster] += cellGround[index] * mass;
+      pyroClusterN[cluster] += 1;
+    }
+    const ranked: number[] = [];
+    for (let cluster = 0; cluster < PYRO_CLUSTER_COUNT; cluster++) {
+      if (pyroClusterHeat[cluster] < 3.4) continue;
+      ranked.push(cluster);
+    }
+    ranked.sort((a, b) => pyroClusterHeat[b] - pyroClusterHeat[a]);
+    const chosen = ranked.slice(0, PYRO_COLUMN_MAX);
+    for (let column = 0; column < PYRO_COLUMN_MAX; column++) {
+      const state = pyroColumnsState[column];
+      const cluster = chosen[column];
+      if (cluster === undefined) {
+        state.intensity *= 0.9;
+        if (state.intensity < 0.05) state.active = false;
         continue;
       }
-      const phase = elapsed * 0.12 + puff * 0.74;
+      const weight = pyroClusterHeat[cluster];
+      const x = pyroClusterX[cluster] / weight;
+      const z = pyroClusterZ[cluster] / weight;
+      const ground = pyroClusterGround[cluster] / weight;
+      if (!state.active) {
+        state.x = x;
+        state.z = z;
+        state.ground = ground;
+        state.active = true;
+      } else {
+        state.x += (x - state.x) * 0.08;
+        state.z += (z - state.z) * 0.08;
+        state.ground += (ground - state.ground) * 0.08;
+      }
+      const target = Math.min(1, pyroClusterHeat[cluster] / 18);
+      state.intensity += (target - state.intensity) * 0.12;
+    }
+    const wind = windVector();
+    const windStrength = windSpeed / 35;
+    for (let column = 0; column < PYRO_COLUMN_MAX; column++) {
+      const state = pyroColumnsState[column];
+      for (let layer = 0; layer < PYRO_PUFFS_PER_COLUMN; layer++) {
+        const puffIndex = column * PYRO_PUFFS_PER_COLUMN + layer;
+        if (!state.active || state.intensity < 0.04) {
+          hideSprite(pyroColumns, puffIndex);
+          continue;
+        }
+        const t = layer / (PYRO_PUFFS_PER_COLUMN - 1);
+        const phase = elapsed * (0.11 + state.seed * 0.05) + layer * 0.47 + state.seed * 8;
+        const rise = 8 + t * (52 + state.intensity * 48);
+        const swell = t * t;
+        const size = (7 + swell * (42 + state.intensity * 36)) * (0.86 + Math.sin(phase) * 0.12);
+        dummy.position.set(
+          state.x + wind.x * (8 + t * (22 + windStrength * 28)) + Math.sin(phase) * (1.4 + t * 9),
+          state.ground + rise + Math.sin(phase * 0.7) * (1.2 + t * 4),
+          state.z + wind.z * (8 + t * (22 + windStrength * 28)) + Math.cos(phase * 0.8) * (1.6 + t * 10),
+        );
+        dummy.scale.set(size, size * (0.62 + t * 0.28), 1);
+        dummy.quaternion.copy(camera.quaternion);
+        dummy.updateMatrix();
+        pyroColumns.setMatrixAt(puffIndex, dummy.matrix);
+        const shade = 0.18 + t * 0.22;
+        pyroColor.setRGB(shade * 1.15, shade * 0.92, shade * 0.72).multiplyScalar(0.55 + state.intensity * 0.45);
+        pyroColumns.setColorAt(puffIndex, pyroColor);
+      }
+    }
+    pyroColumns.instanceMatrix.needsUpdate = true;
+    if (pyroColumns.instanceColor) pyroColumns.instanceColor.needsUpdate = true;
+  };
+
+  const updateSmogWall = (elapsed: number, camera: any, smog: number, frontX: number) => {
+    smogMaterial.opacity = 0.08 + smog * 0.52;
+    const wind = windVector();
+    const wallX = frontX + 34;
+    const camZ = camera.position.z;
+    for (let puff = 0; puff < SMOG_WALL_PUFFS; puff++) {
+      if (smog < 0.04) {
+        hideSprite(smogWall, puff);
+        continue;
+      }
+      const column = puff % 10;
+      const row = Math.floor(puff / 10);
+      const phase = elapsed * 0.16 + puff * 0.51;
+      const puffX = wallX + wind.x * 6 + Math.sin(phase) * 4.5 + column * 1.1;
+      const puffZ = camZ - 42 + column * 9.2 + Math.cos(phase * 0.55) * 3.2;
       dummy.position.set(
-        cellX(index) + wind.x * 10 + Math.sin(phase) * 1.5,
-        SMOKE_CLOUD_ALTITUDE + Math.sin(phase * 0.8) * 1.2,
-        cellZ(index) + wind.z * 10 + Math.cos(phase * 0.7) * 2.5,
+        puffX,
+        terrainHeight(puffX, puffZ) + 3.5 + row * 5.4 + Math.sin(phase * 0.7) * 1.8,
+        puffZ,
       );
-      dummy.scale.set(25 + Math.sin(phase * 0.5) * 2, 14 + Math.cos(phase * 0.4) * 1.5, 1);
+      dummy.scale.set(22 + Math.sin(phase) * 3, 14 + row * 1.4, 1);
       dummy.quaternion.copy(camera.quaternion);
       dummy.updateMatrix();
-      smokeCloud.setMatrixAt(puff, dummy.matrix);
+      smogWall.setMatrixAt(puff, dummy.matrix);
     }
-    smokeCloud.instanceMatrix.needsUpdate = true;
+    smogWall.instanceMatrix.needsUpdate = true;
+  };
+
+  const spawnAmbientAsh = (camera: any, count: number) => {
+    const wind = windVector();
+    const strength = windSpeed / 35;
+    for (let i = 0; i < count; i++) {
+      const x = camera.position.x + (random() - 0.5) * 110;
+      const z = camera.position.z + (random() - 0.5) * 110;
+      ashCursor = addParticle(ashParticles, ASH_CAPACITY, ashCursor, {
+        x,
+        y: camera.position.y + 6 + random() * 18,
+        z,
+        vx: wind.x * (1.2 + strength * 4) + (random() - 0.5) * 0.6,
+        vy: -0.35 - random() * 1.4,
+        vz: wind.z * (1.2 + strength * 4) + (random() - 0.5) * 0.6,
+        age: 0,
+        life: 4.5 + random() * 5.5,
+      });
+    }
+  };
+
+  const spawnEmberBlizzard = (camera: any, intensity: number, dt: number) => {
+    if (intensity < 0.05) return;
+    const wind = windVector();
+    const spawnCount = Math.min(80, Math.ceil(55 * intensity + 400 * intensity * dt));
+    const sidewaysX = -wind.z;
+    const sidewaysZ = wind.x;
+    for (let i = 0; i < spawnCount; i++) {
+      const lateral = (random() - 0.5) * 28;
+      const ahead = -8 + random() * 18;
+      blizzardCursor = addParticle(blizzardParticles, BLIZZARD_CAPACITY, blizzardCursor, {
+        x: camera.position.x + wind.x * ahead + sidewaysX * lateral,
+        y: camera.position.y + (random() - 0.35) * 8,
+        z: camera.position.z + wind.z * ahead + sidewaysZ * lateral,
+        vx: wind.x * (14 + random() * 22) + (random() - 0.5) * 3,
+        vy: (random() - 0.6) * 4.5,
+        vz: wind.z * (14 + random() * 22) + (random() - 0.5) * 3,
+        age: 0,
+        life: 0.55 + random() * 1.1,
+      });
+    }
+  };
+
+  const updateVisualParticles = (
+    particles: Particle[],
+    dt: number,
+    positions: Float32Array,
+    colors: Float32Array,
+    geometry: any,
+    kind: 'ash' | 'blizzard',
+  ) => {
+    const wind = windVector();
+    const windStrength = windSpeed / 35;
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const particle = particles[i];
+      particle.age += dt;
+      if (particle.age >= particle.life) {
+        const lastIdx = particles.length - 1;
+        if (lastIdx !== i) {
+          positions[i * 3] = positions[lastIdx * 3];
+          positions[i * 3 + 1] = positions[lastIdx * 3 + 1];
+          positions[i * 3 + 2] = positions[lastIdx * 3 + 2];
+          colors[i * 3] = colors[lastIdx * 3];
+          colors[i * 3 + 1] = colors[lastIdx * 3 + 1];
+          colors[i * 3 + 2] = colors[lastIdx * 3 + 2];
+        }
+        particles[i] = particles[lastIdx];
+        particles.pop();
+        continue;
+      }
+      const fade = 1 - particle.age / particle.life;
+      particle.vx += wind.x * windStrength * (kind === 'blizzard' ? 8 : 1.4) * dt;
+      particle.vz += wind.z * windStrength * (kind === 'blizzard' ? 8 : 1.4) * dt;
+      particle.vy += (kind === 'ash' ? -0.35 : -0.1) * dt;
+      particle.x += particle.vx * dt;
+      particle.y += particle.vy * dt;
+      particle.z += particle.vz * dt;
+      const offset = i * 3;
+      positions[offset] = particle.x;
+      positions[offset + 1] = particle.y;
+      positions[offset + 2] = particle.z;
+      if (kind === 'ash') {
+        const grey = 0.28 + fade * 0.42;
+        colors[offset] = grey * 1.05;
+        colors[offset + 1] = grey * 0.95;
+        colors[offset + 2] = grey * 0.82;
+      } else {
+        colors[offset] = 1;
+        colors[offset + 1] = 0.28 + fade * 0.55;
+        colors[offset + 2] = 0.04 + fade * 0.1;
+      }
+    }
+    geometry.setDrawRange(0, particles.length);
+    geometry.attributes.position.needsUpdate = true;
+    geometry.attributes.color.needsUpdate = true;
   };
 
   const removeActiveCell = (index: number) => {
@@ -756,19 +1060,49 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     }
 
     // Only burning cells are visited; the full grid is never scanned per frame.
-    // This pass also maintains the current fire front used by the smoke cloud.
     frontByRow.fill(-1);
+    let nearestDist = 1e9;
+    let nearestIndex = -1;
+    let frontX = GRID_ORIGIN;
     for (const index of activeCells) {
       const row = rowOf(index);
       if (columnOf(index) > (frontByRow[row] < 0 ? -1 : columnOf(frontByRow[row]))) {
         frontByRow[row] = index;
       }
       const x = cellX(index);
+      if (x > frontX) frontX = x;
+      const dist = Math.hypot(x - camera.position.x, cellZ(index) - camera.position.z);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestIndex = index;
+      }
+    }
+    const approachDist = camera.position.x - frontX;
+    const heat = nearestIndex < 0 ? 0 : THREE.MathUtils.clamp(1 - nearestDist / 36, 0, 1);
+    const smog = bandFalloff(approachDist, 38, 40) * (burningCount > 0 ? 1 : 0);
+    const emberStorm = bandFalloff(approachDist, 16, 15) * (burningCount > 0 ? 1 : 0);
+    atmosphere.heat = heat;
+    atmosphere.smog = smog;
+    atmosphere.emberStorm = emberStorm;
+    atmosphere.fogDensity = BASE_FOG_DENSITY + smog * 0.022 + heat * 0.018;
+    if (nearestIndex >= 0) {
+      atmosphere.glowX = cellX(nearestIndex);
+      atmosphere.glowY = cellGround[nearestIndex] + Math.max(3, flameHeight[nearestIndex] * 0.45);
+      atmosphere.glowZ = cellZ(nearestIndex);
+      atmosphere.glowStrength = (0.8 + heat * 4.8) * (crownMask[nearestIndex] ? 1.35 : 1);
+    } else {
+      atmosphere.glowStrength *= 0.85;
+    }
+
+    const flameBoost = 1 + THREE.MathUtils.clamp(1 - nearestDist / 22, 0, 1) * 0.55;
+    for (const index of activeCells) {
+      const x = cellX(index);
       const z = cellZ(index);
       const ground = cellGround[index];
       const phase = elapsed * (crownMask[index] ? 9.5 : 7.1) + index * 0.73;
       const flicker = 0.88 + Math.sin(phase) * 0.075 + Math.sin(phase * 2.31) * 0.035;
-      const height = flameHeight[index] * flicker * burnLifeFactor(index);
+      const close = Math.hypot(x - camera.position.x, z - camera.position.z) < 26 ? flameBoost : 1;
+      const height = flameHeight[index] * flicker * burnLifeFactor(index) * close;
       const grass = fuels[index] === GRASS;
       const width = CELL_SIZE * (grass ? 1.42 : 1.22);
       const coreWidth = CELL_SIZE * (grass ? 0.98 : 0.68);
@@ -778,16 +1112,22 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     outerFlames.instanceMatrix.needsUpdate = true;
     innerFlames.instanceMatrix.needsUpdate = true;
 
-    updateSmokeCloud(elapsed, camera);
+    updatePyrocumulus(elapsed, camera);
+    updateSmogWall(elapsed, camera, smog, frontX);
+    spawnAmbientAsh(camera, ashParticles.length < 240 ? 48 : ashParticles.length < ASH_CAPACITY * 0.78 ? 16 : 2);
+    spawnEmberBlizzard(camera, emberStorm, dt);
     updateParticleList(emberParticles, dt, emberPositions, emberColors, (targetIndex) => {
       ignite(targetIndex);
     });
+    updateVisualParticles(ashParticles, dt, ashPositions, ashColors, ashGeometry, 'ash');
+    updateVisualParticles(blizzardParticles, dt, blizzardPositions, blizzardColors, blizzardGeometry, 'blizzard');
 
     statsClock += dt;
     if (statsClock >= 0.55) {
       statsClock = 0;
       if (statsDirty) maybePublishStats(true);
     }
+    return atmosphere;
   };
 
   // Begin as one continuous west-edge fireline, then slowly advance east.
@@ -815,12 +1155,19 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       dirtGeometry.dispose();
       dirtMaterial.dispose();
       smokeTexture.dispose();
+      smogTexture.dispose();
       emberTexture.dispose();
+      ashTexture.dispose();
       emberGeometry.dispose();
+      ashGeometry.dispose();
+      blizzardGeometry.dispose();
       trailGeometry.dispose();
       trailMaterial.dispose();
-      smokeMaterial.dispose();
+      pyroMaterial.dispose();
+      smogMaterial.dispose();
       emberMaterial.dispose();
+      ashMaterial.dispose();
+      blizzardMaterial.dispose();
     },
   };
 }
@@ -868,7 +1215,7 @@ function createFlameTexture(THREE: any) {
   return texture;
 }
 
-function createParticleTexture(THREE: any, kind: 'smoke' | 'ember') {
+function createParticleTexture(THREE: any, kind: 'smoke' | 'ember' | 'ash' | 'smog') {
   const canvas = document.createElement('canvas');
   canvas.width = 64;
   canvas.height = 64;
@@ -876,9 +1223,17 @@ function createParticleTexture(THREE: any, kind: 'smoke' | 'ember') {
   if (!context) throw new Error('Could not create a particle texture.');
   const gradient = context.createRadialGradient(32, 32, 2, 32, 32, 31);
   if (kind === 'smoke') {
-    gradient.addColorStop(0, 'rgba(45,42,36,0.64)');
-    gradient.addColorStop(0.48, 'rgba(47,44,39,0.4)');
-    gradient.addColorStop(1, 'rgba(50,47,42,0)');
+    gradient.addColorStop(0, 'rgba(38,32,26,0.7)');
+    gradient.addColorStop(0.42, 'rgba(52,44,36,0.38)');
+    gradient.addColorStop(1, 'rgba(40,34,28,0)');
+  } else if (kind === 'smog') {
+    gradient.addColorStop(0, 'rgba(72,56,40,0.72)');
+    gradient.addColorStop(0.45, 'rgba(58,46,34,0.4)');
+    gradient.addColorStop(1, 'rgba(42,34,26,0)');
+  } else if (kind === 'ash') {
+    gradient.addColorStop(0, 'rgba(210,198,176,0.9)');
+    gradient.addColorStop(0.35, 'rgba(160,148,128,0.45)');
+    gradient.addColorStop(1, 'rgba(90,80,68,0)');
   } else {
     gradient.addColorStop(0, 'rgba(255,255,202,1)');
     gradient.addColorStop(0.28, 'rgba(255,179,59,0.95)');

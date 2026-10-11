@@ -46,17 +46,33 @@ export async function mountForest(
   const { PointerLockControls }: any = await import(/* @vite-ignore */ controlsModuleUrl);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#a8b4a0');
-  scene.fog = new THREE.FogExp2('#a8b4a0', 0.0058);
-  const camera = new THREE.PerspectiveCamera(72, 1, 0.1, 380);
+  const baseFogColor = new THREE.Color(0x1a0802);
+  const heatFogColor = new THREE.Color(0x6a1204);
+  const smogFogColor = new THREE.Color(0x2a1c14);
+  scene.background = baseFogColor.clone();
+  scene.fog = new THREE.FogExp2(0x1a0802, 0.016);
+  const camera = new THREE.PerspectiveCamera(72, 1, 0.1, 420);
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.7));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.12;
+  renderer.toneMappingExposure = 0.78;
   const controls = new PointerLockControls(camera, document.body);
   controls.pointerSpeed = 0.72;
   scene.add(controls.object);
+
+  const skyTexture = createApocalypseSkyTexture(THREE);
+  const sky = new THREE.Mesh(
+    new THREE.SphereGeometry(360, 24, 16),
+    new THREE.MeshBasicMaterial({
+      map: skyTexture,
+      side: THREE.BackSide,
+      depthWrite: false,
+      fog: true,
+    }),
+  );
+  sky.renderOrder = -10;
+  scene.add(sky);
 
   // Simple camera-attached McLeod view model: timber handle, rake head and teeth.
   const mcleod = new THREE.Group();
@@ -79,14 +95,46 @@ export async function mountForest(
     mcleod.add(tine);
   }
 
-  const hemi = new THREE.HemisphereLight('#e1e5c8', '#485b43', 2.05);
+  const hemi = new THREE.HemisphereLight(0xc24a18, 0x140804, 0.62);
   scene.add(hemi);
-  const sun = new THREE.DirectionalLight('#fff1cb', 2.4);
-  sun.position.set(-32, 58, 24);
+  const sun = new THREE.DirectionalLight(0xff9a4a, 0.48);
+  sun.position.set(-22, 26, 14);
   scene.add(sun);
-  const fill = new THREE.DirectionalLight('#a6b8a2', 0.55);
-  fill.position.set(30, 18, -35);
+  const fill = new THREE.DirectionalLight(0x5a2210, 0.28);
+  fill.position.set(26, 12, -30);
   scene.add(fill);
+  const fireGlow = new THREE.PointLight(0xff5a14, 0, 56, 1.65);
+  scene.add(fireGlow);
+
+  const heatTint = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.4, 2.4),
+    new THREE.MeshBasicMaterial({
+      color: 0xff3a00,
+      transparent: true,
+      opacity: 0,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  heatTint.position.set(0, 0, -0.72);
+  heatTint.frustumCulled = false;
+  heatTint.renderOrder = 1000;
+  camera.add(heatTint);
+  const smogVeil = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.4, 2.4),
+    new THREE.MeshBasicMaterial({
+      color: 0x3a2a1c,
+      transparent: true,
+      opacity: 0,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  smogVeil.position.set(0, 0, -0.74);
+  smogVeil.frustumCulled = false;
+  smogVeil.renderOrder = 999;
+  camera.add(smogVeil);
 
   // Deterministic terrain undulation gives the walk a grounded, irregular path.
   const hill = (x: number, z: number, cx: number, cz: number, rx: number, rz: number, height: number) =>
@@ -600,7 +648,21 @@ export async function mountForest(
       }
     }
     if (terrainColorChanged) terrainColorAttribute.needsUpdate = true;
-    fireSystem.update(dt, now / 1000, camera);
+    const atmosphere = fireSystem.update(dt, now / 1000, camera);
+    const fog = scene.fog;
+    const targetFog = baseFogColor.clone().lerp(smogFogColor, atmosphere.smog).lerp(heatFogColor, atmosphere.heat);
+    fog.color.copy(targetFog);
+    fog.density = atmosphere.fogDensity;
+    scene.background.copy(targetFog);
+    hemi.intensity = 0.48 + atmosphere.heat * 0.55 + atmosphere.smog * 0.08;
+    hemi.color.setHex(atmosphere.heat > 0.45 ? 0xff6a1c : 0xc24a18);
+    sun.intensity = 0.22 + (1 - atmosphere.smog) * 0.28 - atmosphere.heat * 0.08;
+    sun.color.setHex(atmosphere.smog > 0.4 ? 0xc46a28 : 0xff9a4a);
+    fireGlow.position.set(atmosphere.glowX, atmosphere.glowY, atmosphere.glowZ);
+    fireGlow.intensity = atmosphere.glowStrength;
+    heatTint.material.opacity = atmosphere.heat * 0.42;
+    smogVeil.material.opacity = atmosphere.smog * 0.46;
+    renderer.toneMappingExposure = 0.68 + atmosphere.heat * 0.55 - atmosphere.smog * 0.12;
     renderer.render(scene, camera);
   };
   frame = requestAnimationFrame(animate);
@@ -627,6 +689,7 @@ export async function mountForest(
       controls.removeEventListener('lock', onLock);
       controls.removeEventListener('unlock', onUnlock);
       fireSystem.dispose();
+      skyTexture.dispose();
       controls.dispose();
       scene.traverse((object: any) => {
         object.geometry?.dispose?.();
@@ -636,4 +699,25 @@ export async function mountForest(
       renderer.dispose();
     },
   };
+}
+
+function createApocalypseSkyTexture(THREE: any) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 8;
+  canvas.height = 256;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Could not create the sky texture.');
+  const gradient = context.createLinearGradient(0, 0, 0, 256);
+  gradient.addColorStop(0, '#0a0406');
+  gradient.addColorStop(0.38, '#1c0806');
+  gradient.addColorStop(0.62, '#4a1408');
+  gradient.addColorStop(0.82, '#a8320c');
+  gradient.addColorStop(0.93, '#c44512');
+  gradient.addColorStop(1, '#1a0802');
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 8, 256);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
 }
