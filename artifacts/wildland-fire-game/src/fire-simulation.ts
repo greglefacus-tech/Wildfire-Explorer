@@ -182,6 +182,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   bushes.forEach((point) => paintFuel(point, BRUSH, 1.05));
   trees.forEach((point) => paintFuel(point, TREE, 1.18));
 
+  const plane = new THREE.PlaneGeometry(1, 1);
   const flameRibbonGeometry = new THREE.PlaneGeometry(1, 1, 2, 3);
   const flameTexture = createFlameTexture(THREE);
   const flameMaterial = new THREE.ShaderMaterial({
