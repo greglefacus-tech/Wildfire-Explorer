@@ -53,8 +53,7 @@ export type FireSimulation = {
 const MAP_LIMIT = 148;
 const SPREAD_RANGE = 16;
 const MAX_WATER_PARTICLES = 1600;
-const MAX_FIRE_SPRITES = 12000;
-const FIRE_FRAMES_PER_NODE = 3;
+const FIRE_RIBBONS_PER_NODE = 3;
 
 export function createFireSimulation(options: FireSystemOptions): FireSimulation {
   const { THREE, scene, terrainHeight, random } = options;
@@ -94,26 +93,81 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   options.bushes.forEach((point) => makeFuel(point, 'brush'));
   options.trees.forEach((point) => makeFuel(point, 'tree'));
 
+  const MAX_FIRE_QUADS = Math.max(8192, (options.grassPatches.length + options.bushes.length + options.trees.length + 112) * 10);
+  const firePositions = new Float32Array(MAX_FIRE_QUADS * 4 * 3);
+  const fireUvs = new Float32Array(MAX_FIRE_QUADS * 4 * 2);
+  const fireSeeds = new Float32Array(MAX_FIRE_QUADS * 4);
+  const fireIndices = new Uint32Array(MAX_FIRE_QUADS * 6);
+  const firePositionAttribute = new THREE.BufferAttribute(firePositions, 3).setUsage(THREE.DynamicDrawUsage);
+  const fireUvAttribute = new THREE.BufferAttribute(fireUvs, 2).setUsage(THREE.DynamicDrawUsage);
+  const fireSeedAttribute = new THREE.BufferAttribute(fireSeeds, 1).setUsage(THREE.DynamicDrawUsage);
+  const fireIndexAttribute = new THREE.BufferAttribute(fireIndices, 1).setUsage(THREE.DynamicDrawUsage);
   const fireGeometry = new THREE.BufferGeometry();
-  const firePositions = new Float32Array(MAX_FIRE_SPRITES * 3);
-  const fireColors = new Float32Array(MAX_FIRE_SPRITES * 3);
-  fireGeometry.setAttribute('position', new THREE.BufferAttribute(firePositions, 3).setUsage(THREE.DynamicDrawUsage));
-  fireGeometry.setAttribute('color', new THREE.BufferAttribute(fireColors, 3).setUsage(THREE.DynamicDrawUsage));
+  fireGeometry.setAttribute('position', firePositionAttribute);
+  fireGeometry.setAttribute('uv', fireUvAttribute);
+  fireGeometry.setAttribute('aSeed', fireSeedAttribute);
+  fireGeometry.setIndex(fireIndexAttribute);
   fireGeometry.setDrawRange(0, 0);
-  const fireTexture = makeSpriteTexture(THREE, 'fire');
-  const fireMaterial = new THREE.PointsMaterial({
-    map: fireTexture,
-    size: 2.8,
+  const fireMaterial = new THREE.ShaderMaterial({
     transparent: true,
-    opacity: 0.96,
     depthWrite: false,
+    side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending,
-    vertexColors: true,
-    sizeAttenuation: true,
+    uniforms: {
+      uTime: { value: 0 },
+      uWind: { value: new THREE.Vector2() },
+      uWindLean: { value: 0 },
+    },
+    vertexShader: `
+      uniform float uTime;
+      uniform vec2 uWind;
+      uniform float uWindLean;
+      attribute float aSeed;
+      varying vec2 vUv;
+      varying float vSeed;
+      varying float vTurbulence;
+      void main() {
+        vUv = uv;
+        vSeed = aSeed;
+        vec3 displaced = position;
+        float rise = uv.y;
+        float turbulence = sin(uv.x * 17.0 + uTime * 3.5 + aSeed * 31.0 + rise * 8.0);
+        float lick = sin(uv.x * 9.0 - uTime * 2.6 + aSeed * 19.0);
+        displaced.x += uWind.x * rise * rise * uWindLean + turbulence * 0.07 * rise;
+        displaced.z += uWind.y * rise * rise * uWindLean + lick * 0.07 * rise;
+        displaced.y += turbulence * 0.08 * rise + lick * 0.035 * rise;
+        vTurbulence = turbulence * 0.5 + lick * 0.5;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      varying vec2 vUv;
+      varying float vSeed;
+      varying float vTurbulence;
+      void main() {
+        float rise = vUv.y;
+        float horizontal = abs(vUv.x - 0.5) * 2.0;
+        float lobe = 0.34 + 0.46 * (0.5 + 0.5 * sin(vUv.x * 18.0 + vSeed * 27.0 + uTime * 4.0));
+        float width = mix(0.49, 0.035, rise) * (0.7 + lobe * 0.3) + vTurbulence * 0.025;
+        float flameSilhouette = 1.0 - smoothstep(width - 0.035, width + 0.035, horizontal);
+        float connector = step(0.5, -vSeed);
+        float silhouette = mix(flameSilhouette, 1.0, connector);
+        float baseFade = smoothstep(0.0, 0.065, rise);
+        float tipFade = 1.0 - smoothstep(0.9, 1.0, rise) * 0.35;
+        float flicker = 0.78 + 0.22 * sin(uTime * 13.0 + vSeed * 41.0 + rise * 19.0 + vTurbulence * 2.5);
+        float core = 1.0 - smoothstep(0.0, 0.78, rise);
+        core *= 1.0 - connector * 0.82;
+        vec3 color = mix(vec3(1.0, 0.1, 0.008), vec3(1.0, 0.42, 0.035), core);
+        color = mix(color, vec3(1.0, 0.78, 0.32), core * core * 0.3);
+        gl_FragColor = vec4(color, silhouette * baseFade * tipFade * flicker * mix(0.46, 0.34, connector));
+      }
+    `,
   });
-  const firePoints = new THREE.Points(fireGeometry, fireMaterial);
-  firePoints.frustumCulled = false;
-  scene.add(firePoints);
+  const fireMesh = new THREE.Mesh(fireGeometry, fireMaterial);
+  fireMesh.frustumCulled = false;
+  fireMesh.renderOrder = 2;
+  scene.add(fireMesh);
 
   const waterGeometry = new THREE.BufferGeometry();
   const waterPositions = new Float32Array(MAX_WATER_PARTICLES * 3);
@@ -254,6 +308,125 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     ignite(seed);
   }
 
+  let fireQuadCount = 0;
+  let fireRenderClock = 0;
+  const appendFireQuad = (
+    bottomA: { x: number; y: number; z: number },
+    bottomB: { x: number; y: number; z: number },
+    topB: { x: number; y: number; z: number },
+    topA: { x: number; y: number; z: number },
+    seed: number,
+  ) => {
+    if (fireQuadCount >= MAX_FIRE_QUADS) return;
+    const firstVertex = fireQuadCount * 4;
+    const corners = [bottomA, bottomB, topB, topA];
+    for (let corner = 0; corner < 4; corner++) {
+      const vertex = firstVertex + corner;
+      const offset = vertex * 3;
+      firePositions[offset] = corners[corner].x;
+      firePositions[offset + 1] = corners[corner].y;
+      firePositions[offset + 2] = corners[corner].z;
+      fireUvs[vertex * 2] = corner === 0 || corner === 3 ? 0 : 1;
+      fireUvs[vertex * 2 + 1] = corner < 2 ? 0 : 1;
+      fireSeeds[vertex] = seed;
+    }
+    const index = fireQuadCount * 6;
+    fireIndices[index] = firstVertex;
+    fireIndices[index + 1] = firstVertex + 1;
+    fireIndices[index + 2] = firstVertex + 2;
+    fireIndices[index + 3] = firstVertex;
+    fireIndices[index + 4] = firstVertex + 2;
+    fireIndices[index + 5] = firstVertex + 3;
+    fireQuadCount++;
+  };
+
+  const rebuildFireMesh = (elapsed: number) => {
+    fireQuadCount = 0;
+    const wind = windVector();
+    const widths = { front: 2.5, grass: 1.2, brush: 1.05, tree: 0.42 };
+    const heights = (node: FuelNode) => node.crown
+      ? Math.max(10, node.height * 1.6)
+      : node.kind === 'tree'
+        ? Math.max(1.2, 1.2 + node.height * node.climb)
+        : node.kind === 'front' ? 7.2 : node.kind === 'brush' ? 3.3 : 1.65;
+    const centers = active.map((node) => ({
+      node,
+      ground: terrainHeight(node.x, node.z),
+      height: heights(node),
+    }));
+
+    for (let index = 0; index < centers.length; index++) {
+      const { node, ground, height } = centers[index];
+      const halfWidth = widths[node.kind] * (node.crown ? 2.2 : 1);
+      const lean = (windSpeed / 35) * height * 0.34;
+      for (let ribbon = 0; ribbon < FIRE_RIBBONS_PER_NODE; ribbon++) {
+        const angle = ribbon * Math.PI / FIRE_RIBBONS_PER_NODE + Math.sin(elapsed * 0.3 + node.x + node.z) * 0.08;
+        const sideX = Math.cos(angle) * halfWidth;
+        const sideZ = Math.sin(angle) * halfWidth;
+        const topX = node.x + wind.x * lean;
+        const topZ = node.z + wind.z * lean;
+        appendFireQuad(
+          { x: node.x - sideX, y: ground, z: node.z - sideZ },
+          { x: node.x + sideX, y: ground, z: node.z + sideZ },
+          { x: topX + sideX * 0.045, y: ground + height, z: topZ + sideZ * 0.045 },
+          { x: topX - sideX * 0.045, y: ground + height, z: topZ - sideZ * 0.045 },
+          index * 0.173 + node.age * 0.07,
+        );
+      }
+    }
+
+    const bucketSize = 5.5;
+    const buckets = new Map<string, number[]>();
+    for (let index = 0; index < centers.length; index++) {
+      const node = centers[index].node;
+      const key = `${Math.floor(node.x / bucketSize)},${Math.floor(node.z / bucketSize)}`;
+      const bucket = buckets.get(key) ?? [];
+      bucket.push(index);
+      buckets.set(key, bucket);
+    }
+    for (let index = 0; index < centers.length; index++) {
+      const a = centers[index];
+      const bucketX = Math.floor(a.node.x / bucketSize);
+      const bucketZ = Math.floor(a.node.z / bucketSize);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const bucket = buckets.get(`${bucketX + dx},${bucketZ + dz}`);
+          if (!bucket) continue;
+          for (const otherIndex of bucket) {
+            if (otherIndex <= index) continue;
+            const b = centers[otherIndex];
+            const distance = Math.hypot(b.node.x - a.node.x, b.node.z - a.node.z);
+            if (distance < 0.25 || distance > 4.35) continue;
+            const connectorHeight = Math.max(1.8, Math.min(a.height, b.height) * 0.42);
+            const lean = (windSpeed / 35) * 0.22;
+            appendFireQuad(
+              { x: a.node.x, y: a.ground, z: a.node.z },
+              { x: b.node.x, y: b.ground, z: b.node.z },
+              { x: b.node.x + wind.x * connectorHeight * lean, y: b.ground + connectorHeight, z: b.node.z + wind.z * connectorHeight * lean },
+              { x: a.node.x + wind.x * connectorHeight * lean, y: a.ground + connectorHeight, z: a.node.z + wind.z * connectorHeight * lean },
+              -1,
+            );
+          }
+        }
+      }
+    }
+
+    const vertexCount = fireQuadCount * 4;
+    fireGeometry.setDrawRange(0, fireQuadCount * 6);
+    firePositionAttribute.clearUpdateRanges();
+    firePositionAttribute.addUpdateRange(0, vertexCount * 3);
+    firePositionAttribute.needsUpdate = true;
+    fireUvAttribute.clearUpdateRanges();
+    fireUvAttribute.addUpdateRange(0, vertexCount * 2);
+    fireUvAttribute.needsUpdate = true;
+    fireSeedAttribute.clearUpdateRanges();
+    fireSeedAttribute.addUpdateRange(0, vertexCount);
+    fireSeedAttribute.needsUpdate = true;
+    fireIndexAttribute.clearUpdateRanges();
+    fireIndexAttribute.addUpdateRange(0, fireQuadCount * 6);
+    fireIndexAttribute.needsUpdate = true;
+  };
+
   const updateParticles = (particles: WaterParticle[], positions: Float32Array, colors: Float32Array, geometry: any, dt: number, type: 'water' | 'steam') => {
     let count = 0;
     for (let index = particles.length - 1; index >= 0; index--) {
@@ -356,29 +529,15 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       maxX = Math.max(maxX, node.x);
       activeHeat += node.crown ? 4.5 : node.kind === 'tree' ? 1.4 : node.kind === 'brush' ? 0.9 : 0.45;
     }
-    const positions = fireGeometry.attributes.position;
-    const colors = fireGeometry.attributes.color;
-    let spriteIndex = 0;
-    for (const node of active) {
-      const ground = terrainHeight(node.x, node.z);
-      const stageHeight = node.kind === 'tree' ? 1.2 + node.height * node.climb : node.kind === 'brush' ? 3 : 1.5;
-      const height = node.crown ? Math.max(node.height * 1.6, 10) : stageHeight;
-      for (let sprite = 0; sprite < FIRE_FRAMES_PER_NODE && spriteIndex < MAX_FIRE_SPRITES; sprite++) {
-        const phase = elapsed * (node.crown ? 8 : 5) + sprite * 2.1 + node.x * 0.1 + node.z * 0.13;
-        const offset = spriteIndex * 3;
-        firePositions[offset] = node.x + Math.sin(phase) * (node.kind === 'tree' ? 0.18 : 0.45);
-        firePositions[offset + 1] = ground + height * (0.2 + sprite * 0.27) + Math.sin(phase * 1.4) * 0.18;
-        firePositions[offset + 2] = node.z + Math.cos(phase * 0.8) * (node.kind === 'tree' ? 0.18 : 0.45);
-        const brightness = node.crown ? 1 : 0.72;
-        fireColors[offset] = 1;
-        fireColors[offset + 1] = brightness * (0.2 + sprite * 0.17);
-        fireColors[offset + 2] = node.crown ? 0.18 : 0.025;
-        spriteIndex++;
-      }
+    fireRenderClock += dt;
+    fireMaterial.uniforms.uTime.value = elapsed;
+    const wind = windVector();
+    fireMaterial.uniforms.uWind.value.set(wind.x, wind.z);
+    fireMaterial.uniforms.uWindLean.value = (windSpeed / 35) * 0.5;
+    if (fireRenderClock >= 0.09) {
+      rebuildFireMesh(elapsed);
+      fireRenderClock = 0;
     }
-    fireGeometry.setDrawRange(0, spriteIndex);
-    fireGeometry.attributes.position.needsUpdate = true;
-    fireGeometry.attributes.color.needsUpdate = true;
     updateParticles(water, waterPositions, waterColors, waterGeometry, dt, 'water');
     updateParticles(steam, steamPositions, steamColors, steamGeometry, dt, 'steam');
     dirtGeometry.setAttribute('position', new THREE.Float32BufferAttribute(dirtPositions, 3));
@@ -473,7 +632,6 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     getStats,
     dispose: () => {
       fireGeometry.dispose();
-      fireTexture.dispose();
       fireMaterial.dispose();
       waterGeometry.dispose();
       waterTexture.dispose();
@@ -487,19 +645,14 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   };
 }
 
-function makeSpriteTexture(THREE: any, type: 'fire' | 'water' | 'steam') {
+function makeSpriteTexture(THREE: any, type: 'water' | 'steam') {
   const canvas = document.createElement('canvas');
   canvas.width = 64;
   canvas.height = 64;
   const context = canvas.getContext('2d');
   if (!context) throw new Error(`Could not create ${type} particle texture.`);
   const gradient = context.createRadialGradient(32, 32, 1, 32, 32, 31);
-  if (type === 'fire') {
-    gradient.addColorStop(0, 'rgba(255,244,185,1)');
-    gradient.addColorStop(0.24, 'rgba(255,191,64,0.95)');
-    gradient.addColorStop(0.62, 'rgba(255,72,12,0.6)');
-    gradient.addColorStop(1, 'rgba(120,20,4,0)');
-  } else if (type === 'water') {
+  if (type === 'water') {
     gradient.addColorStop(0, 'rgba(220,250,255,0.9)');
     gradient.addColorStop(0.3, 'rgba(91,194,255,0.65)');
     gradient.addColorStop(1, 'rgba(45,128,210,0)');
