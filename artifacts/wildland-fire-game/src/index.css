@@ -175,6 +175,33 @@ button:focus-visible, input:focus-visible { outline: 2px solid #f0ce70; outline-
   .menu-actions { flex-direction: column-reverse; }
   .menu-button { width: 100%; }
 }
+@media (max-height: 540px) {
+  .hud { padding: 10px; }
+  .top-row { gap: 8px; }
+  .brand-lockup { gap: 7px; }
+  .brand-mark { width: 25px; height: 25px; font-size: 11px; }
+  .eyebrow { display: none; }
+  .brand-name { margin-top: 0; font-size: 9px; letter-spacing: .08em; }
+  .wind-card { width: min(224px, 42vw); padding: 7px 9px; }
+  .wind-heading { font-size: 7px; }
+  .wind-readout { gap: 6px; margin: 5px 0 3px; }
+  .wind-arrow { width: 21px; height: 21px; font-size: 13px; }
+  .wind-value, .wind-speed { font-size: 9px; }
+  .wind-range { gap: 6px; }
+  .range-label { font-size: 6px; }
+  .range-label output { font-size: 7px; }
+  input[type="range"] { height: 12px; }
+  .wind-cues, .key-layout, .controls-instruction, .footer-note { display: none; }
+  .telemetry { width: min(330px, 46vw); margin-top: 6px; }
+  .metric { padding: 5px 6px; }
+  .metric-value { font-size: 12px; }
+  .metric-label { margin-top: 3px; font-size: 6px; letter-spacing: .03em; }
+  .lower-left { left: 10px; bottom: 10px; gap: 0; }
+  .controls-card { width: min(250px, calc(100vw - 20px)); padding: 8px 10px; }
+  .controls-title { margin-bottom: 4px; font-size: 8px; }
+  .tool-hud { margin-bottom: 0; padding: 4px 7px; }
+  .walk-status { right: 10px; bottom: 10px; max-width: 150px; font-size: 7px; }
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
