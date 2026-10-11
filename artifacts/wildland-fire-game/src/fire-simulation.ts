@@ -200,29 +200,43 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       uniform float uTime;
       varying vec2 vUv;
       varying float vNoise;
-      float hash(vec2 p) {
-        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      vec3 permute(vec3 value) {
+        return mod((value * 34.0 + 1.0) * value, 289.0);
       }
-      float noise(vec2 p) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        float a = hash(i);
-        float b = hash(i + vec2(1.0, 0.0));
-        float c = hash(i + vec2(0.0, 1.0));
-        float d = hash(i + vec2(1.0, 1.0));
-        vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+      float snoise(vec2 point) {
+        const vec4 constants = vec4(0.2113248654, 0.3660254038, -0.5773502692, 0.0243902439);
+        vec2 cell = floor(point + dot(point, constants.yy));
+        vec2 local = point - cell + dot(cell, constants.xx);
+        vec2 corner = local.x > local.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+        vec4 offsets = local.xyxy + constants.xxzz;
+        offsets.xy -= corner;
+        cell = mod(cell, 289.0);
+        vec3 hash = permute(permute(cell.y + vec3(0.0, corner.y, 1.0)) + cell.x + vec3(0.0, corner.x, 1.0));
+        vec3 weight = max(0.5 - vec3(dot(local, local), dot(offsets.xy, offsets.xy), dot(offsets.zw, offsets.zw)), 0.0);
+        weight *= weight;
+        weight *= weight;
+        vec3 gradientX = 2.0 * fract(hash * constants.www) - 1.0;
+        vec3 gradientH = abs(gradientX) - 0.5;
+        vec3 gradientOffset = floor(gradientX + 0.5);
+        vec3 gradientA = gradientX - gradientOffset;
+        weight *= 1.7928429 - 0.8537347 * (gradientA * gradientA + gradientH * gradientH);
+        vec3 gradient;
+        gradient.x = gradientA.x * local.x + gradientH.x * local.y;
+        gradient.y = gradientA.y * offsets.x + gradientH.y * offsets.y;
+        gradient.z = gradientA.z * offsets.z + gradientH.z * offsets.w;
+        return 130.0 * dot(weight, gradient);
       }
       void main() {
         vUv = uv;
         vec3 transformed = position;
-        float flare = noise(vec2(uv.x * 5.5 + uTime * 0.7, uv.y * 8.0 + uTime * 1.8));
-        float stretch = sin((uv.y * 18.0 + uTime * 10.0) + position.x * 2.0) * 0.24;
-        transformed.x += (uv.y - 0.5) * 0.32 * (0.8 + flare);
-        transformed.y += flare * 0.75 + stretch;
-        transformed.z += sin((uv.x + uv.y) * 18.0 + uTime * 8.0) * 0.14;
-        vNoise = flare;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+        float broadNoise = snoise(vec2(uv.x * 3.2 + uTime * 0.16, uv.y * 2.6 - uTime * 1.35));
+        float fineNoise = snoise(vec2(uv.x * 8.0 - uTime * 0.28, uv.y * 6.0 - uTime * 2.4));
+        float sway = sin(uv.y * 9.0 - uTime * 3.2 + broadNoise * 3.0) * 0.035;
+        transformed.x += uv.y * uv.y * (broadNoise * 0.12 + sway);
+        transformed.y += fineNoise * 0.035;
+        transformed.z += broadNoise * 0.045;
+        vNoise = fineNoise * 0.5 + 0.5;
+        gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(transformed, 1.0);
       }
     `,
     fragmentShader: `
@@ -232,26 +246,42 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       uniform vec3 uColorB;
       varying vec2 vUv;
       varying float vNoise;
-      float hash(vec2 p) {
-        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      vec3 permute(vec3 value) {
+        return mod((value * 34.0 + 1.0) * value, 289.0);
       }
-      float noise(vec2 p) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        float a = hash(i);
-        float b = hash(i + vec2(1.0, 0.0));
-        float c = hash(i + vec2(0.0, 1.0));
-        float d = hash(i + vec2(1.0, 1.0));
-        vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+      float snoise(vec2 point) {
+        const vec4 constants = vec4(0.2113248654, 0.3660254038, -0.5773502692, 0.0243902439);
+        vec2 cell = floor(point + dot(point, constants.yy));
+        vec2 local = point - cell + dot(cell, constants.xx);
+        vec2 corner = local.x > local.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+        vec4 offsets = local.xyxy + constants.xxzz;
+        offsets.xy -= corner;
+        cell = mod(cell, 289.0);
+        vec3 hash = permute(permute(cell.y + vec3(0.0, corner.y, 1.0)) + cell.x + vec3(0.0, corner.x, 1.0));
+        vec3 weight = max(0.5 - vec3(dot(local, local), dot(offsets.xy, offsets.xy), dot(offsets.zw, offsets.zw)), 0.0);
+        weight *= weight;
+        weight *= weight;
+        vec3 gradientX = 2.0 * fract(hash * constants.www) - 1.0;
+        vec3 gradientH = abs(gradientX) - 0.5;
+        vec3 gradientOffset = floor(gradientX + 0.5);
+        vec3 gradientA = gradientX - gradientOffset;
+        weight *= 1.7928429 - 0.8537347 * (gradientA * gradientA + gradientH * gradientH);
+        vec3 gradient;
+        gradient.x = gradientA.x * local.x + gradientH.x * local.y;
+        gradient.y = gradientA.y * offsets.x + gradientH.y * offsets.y;
+        gradient.z = gradientA.z * offsets.z + gradientH.z * offsets.w;
+        return 130.0 * dot(weight, gradient);
       }
       void main() {
-        float edge = 1.0 - abs(vUv.x - 0.5) * 1.8;
-        float flameMask = smoothstep(0.0, 1.0, vUv.y) * edge;
-        float scroll = noise(vec2(vUv.x * 5.0, vUv.y * 8.0 - uTime * 1.8));
-        float flicker = sin((vUv.y * 22.0 + uTime * 11.0) + scroll * 8.0) * 0.18 + 0.82;
-        float alpha = max(0.0, flameMask * (0.65 + vNoise * 0.45 + scroll * 0.7) * flicker) * uOpacity;
-        vec3 color = mix(uColorA, uColorB, vUv.y + scroll * 0.2);
+        float turbulence = snoise(vec2(vUv.x * 5.0 + uTime * 0.18, vUv.y * 7.5 - uTime * 1.7));
+        float scroll = 0.5 + 0.5 * snoise(vec2(vUv.x * 7.0, vUv.y * 10.0 - uTime * 2.1));
+        float horizontal = abs(vUv.x - 0.5) * 2.0;
+        float flameWidth = mix(0.48, 0.025, vUv.y) + turbulence * 0.045;
+        float silhouette = 1.0 - smoothstep(flameWidth - 0.025, flameWidth + 0.045, horizontal);
+        float baseFade = smoothstep(0.0, 0.09, vUv.y);
+        float flicker = 0.76 + 0.24 * sin(vUv.y * 22.0 + uTime * 11.0 + turbulence * 3.0);
+        float alpha = silhouette * baseFade * flicker * (0.82 + scroll * 0.18) * uOpacity;
+        vec3 color = mix(uColorA, uColorB, clamp(vUv.y * 0.82 + scroll * 0.16, 0.0, 1.0));
         gl_FragColor = vec4(color, alpha);
       }
     `,
