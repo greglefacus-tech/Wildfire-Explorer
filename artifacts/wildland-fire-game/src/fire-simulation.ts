@@ -238,7 +238,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   scene.add(smokeCloud);
   const emberMaterial = new THREE.PointsMaterial({
     map: emberTexture,
-    size: 1.35,
+    size: 0.42,
     transparent: true,
     opacity: 0.9,
     depthWrite: false,
@@ -444,43 +444,43 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const sourceZ = cellZ(sourceIndex);
     const sourceY = cellGround[sourceIndex] + Math.max(1, flameHeight[sourceIndex] * 0.78);
 
-    // Do not trace the flight path through the grid: an ember may cross a
-    // cleared firebreak and ignite fuel on the far side.
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const distanceCells = 1 + Math.floor(random() * 4);
-      const crosswindCells = (random() - 0.5) * 0.8;
-      const landingX = sourceX +
-        (wind.x * distanceCells + perpendicularX * crosswindCells) * CELL_SIZE;
-      const landingZ = sourceZ +
-        (wind.z * distanceCells + perpendicularZ * crosswindCells) * CELL_SIZE;
-      const targetIndex = getFireGridCellIndex(landingX, landingZ);
-      if (targetIndex < 0 || states[targetIndex] !== UNBURNED || fuels[targetIndex] === NO_FUEL) continue;
+    const distanceCells = 1 + Math.floor(random() * 7);
+    const crosswindCells = (random() - 0.5) * 1.4;
+    const landingX = sourceX +
+      (wind.x * distanceCells + perpendicularX * crosswindCells) * CELL_SIZE;
+    const landingZ = sourceZ +
+      (wind.z * distanceCells + perpendicularZ * crosswindCells) * CELL_SIZE;
+    const targetIndex = getFireGridCellIndex(landingX, landingZ);
+    const onFuel = targetIndex >= 0 && states[targetIndex] === UNBURNED && fuels[targetIndex] !== NO_FUEL;
+    // Most embers that land on fuel ignite it, but a meaningful minority fizzle out.
+    const willIgnite = onFuel && random() < 0.65;
 
-      const targetX = cellX(targetIndex);
-      const targetZ = cellZ(targetIndex);
-      const flightTime = 0.7 + distanceCells * 0.24;
-      const particle: Particle = {
-        x: sourceX,
-        y: sourceY,
-        z: sourceZ,
-        vx: 0,
-        vy: 0,
-        vz: 0,
-        age: 0,
-        life: flightTime,
-        spotTargetIndex: targetIndex,
-        startX: sourceX,
-        startY: sourceY,
-        startZ: sourceZ,
-        targetX,
-        targetY: cellGround[targetIndex] + 0.16,
-        targetZ,
-        arcHeight: 3 + distanceCells * 1.2,
-      };
-      emberCursor = addParticle(emberParticles, emberCapacity, emberCursor, particle);
-      return true;
-    }
-    return false;
+    const targetX = willIgnite ? cellX(targetIndex) : landingX;
+    const targetZ = willIgnite ? cellZ(targetIndex) : landingZ;
+    const targetY = willIgnite
+      ? cellGround[targetIndex] + 0.16
+      : terrainHeight(landingX, landingZ) + 0.16;
+    const flightTime = 0.7 + distanceCells * 0.24;
+    const particle: Particle = {
+      x: sourceX,
+      y: sourceY,
+      z: sourceZ,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      age: 0,
+      life: flightTime,
+      spotTargetIndex: willIgnite ? targetIndex : undefined,
+      startX: sourceX,
+      startY: sourceY,
+      startZ: sourceZ,
+      targetX,
+      targetY,
+      targetZ,
+      arcHeight: 3 + distanceCells * 1.2,
+    };
+    emberCursor = addParticle(emberParticles, emberCapacity, emberCursor, particle);
+    return true;
   };
 
   const finishBurn = (index: number) => {
@@ -634,7 +634,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       colors[offset + 1] = g;
       colors[offset + 2] = b;
       const speed = Math.hypot(evx, evy, evz);
-      const trailLen = Math.min(speed * 0.16, 4.8);
+      const trailLen = Math.min(speed * 0.07, 1.2);
       const to = i * 6;
       trailPositions[to] = particle.x;
       trailPositions[to + 1] = particle.y;
@@ -726,7 +726,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         emberSpotCooldown[index] <= 0
       ) {
         emberSpotCooldown[index] = crownMask[index] ? 0.9 : 1.8;
-        const spawnChance = crownMask[index] ? 0.8 : fuels[index] === BRUSH ? 0.38 : 0.28;
+        const spawnChance = crownMask[index] ? 0.85 : fuels[index] === BRUSH ? 0.45 : 0.32;
         if (random() < spawnChance) spawnSpottingEmber(index);
       }
       if (spreadClock[index] <= 0) {
