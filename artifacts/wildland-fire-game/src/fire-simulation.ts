@@ -238,7 +238,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
   scene.add(smokeCloud);
   const emberMaterial = new THREE.PointsMaterial({
     map: emberTexture,
-    size: 0.42,
+    size: 0.16,
     transparent: true,
     opacity: 0.9,
     depthWrite: false,
@@ -365,9 +365,9 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         x: x + (random() - 0.5) * CELL_SIZE * 0.45,
         y: ground + 0.4 + random() * Math.max(0.3, flameHeight[index] * 0.22),
         z: z + (random() - 0.5) * CELL_SIZE * 0.45,
-        vx: wind.x * (0.3 + strength * 2.4) + (random() - 0.5) * 1.1,
+        vx: wind.x * (0.3 + strength * 6.5) + (random() - 0.5) * 1.1,
         vy: 0.8 + random() * 2.4 + (crownMask[index] ? 1.5 : 0),
-        vz: wind.z * (0.3 + strength * 2.4) + (random() - 0.5) * 1.1,
+        vz: wind.z * (0.3 + strength * 6.5) + (random() - 0.5) * 1.1,
         age: 0,
         life: 1.6 + random() * 3.0,
       };
@@ -460,7 +460,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
     const targetY = willIgnite
       ? cellGround[targetIndex] + 0.16
       : terrainHeight(landingX, landingZ) + 0.16;
-    const flightTime = 0.7 + distanceCells * 0.24;
+    const flightTime = 0.3 + distanceCells * 0.11;
     const particle: Particle = {
       x: sourceX,
       y: sourceY,
@@ -610,8 +610,8 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
         evz = (particle.z - prevZ) / dt;
       } else {
         const gust = (random() - 0.5) * 0.6 * windStrength;
-        particle.vx += (wind.x * windStrength * 1.35 + gust) * dt;
-        particle.vz += (wind.z * windStrength * 1.35 + gust) * dt;
+        particle.vx += (wind.x * windStrength * 4.0 + gust) * dt;
+        particle.vz += (wind.z * windStrength * 4.0 + gust) * dt;
         particle.vy += (random() - 0.5) * 0.4 * windStrength * dt;
         particle.vx *= 0.982;
         particle.vz *= 0.982;
@@ -634,7 +634,7 @@ export function createFireSimulation(options: FireSystemOptions): FireSimulation
       colors[offset + 1] = g;
       colors[offset + 2] = b;
       const speed = Math.hypot(evx, evy, evz);
-      const trailLen = Math.min(speed * 0.07, 1.2);
+      const trailLen = Math.min(speed * 0.045, 0.6);
       const to = i * 6;
       trailPositions[to] = particle.x;
       trailPositions[to + 1] = particle.y;
